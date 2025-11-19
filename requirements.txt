@@ -1,0 +1,28 @@
+# Pinned requirements for Healix / Baymax.v1
+# Generated from current working environment (curated)
+
+# Core
+gpt4all==2.8.2
+streamlit==1.50.0
+uvicorn==0.37.0
+fastapi==0.118.0
+python-dotenv==1.1.1
+
+# ML / NLP
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+transformers==4.57.0
+sentence-transformers==5.1.1
+numpy==1.26.4
+pandas==2.2.3
+tqdm==4.67.1
+
+# Retrieval (CPU)
+faiss-cpu==1.12.0
+
+# LLM backends
+llama-cpp-python==0.3.4
+
+# Utilities
+diskcache==5.6.3
