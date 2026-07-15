@@ -111,8 +111,9 @@ class MedicalRetriever:
     def _load_index(self):
         """Load FAISS index and associated data"""
         
-        # Check if all required files exist
-        required_files = [self.index_path, self.chunks_path, self.metadata_path]
+        # Check if all required files exist (metadata is optional; it is a
+        # strict subset of indexed_chunks.pkl and is not read at runtime)
+        required_files = [self.index_path, self.chunks_path]
         missing_files = [f for f in required_files if not f.exists()]
         
         if missing_files:
@@ -152,15 +153,20 @@ class MedicalRetriever:
             self.chunks = pickle.load(f)
         print(f"Loaded {len(self.chunks)} chunks")
         
-        # Load metadata (lighter version without text)
-        print(f"Loading metadata from: {self.metadata_path}")
-        with open(self.metadata_path, 'rb') as f:
-            self.metadata = pickle.load(f)
-        print(f"Loaded {len(self.metadata)} metadata entries")
-        
+        # Load metadata (optional; lighter version without text)
+        if self.metadata_path.exists():
+            print(f"Loading metadata from: {self.metadata_path}")
+            with open(self.metadata_path, 'rb') as f:
+                self.metadata = pickle.load(f)
+            print(f"Loaded {len(self.metadata)} metadata entries")
+        else:
+            self.metadata = None
+
         # Verify consistency
-        if len(self.chunks) != len(self.metadata) or len(self.chunks) != self.index.ntotal:
-            raise ValueError("Mismatch between index, chunks, and metadata sizes")
+        if len(self.chunks) != self.index.ntotal:
+            raise ValueError("Mismatch between index and chunks sizes")
+        if self.metadata is not None and len(self.metadata) != len(self.chunks):
+            raise ValueError("Mismatch between metadata and chunks sizes")
             
     def retrieve(self, query: str, k: int = 10, min_score: float = 0.0) -> List[Dict]:
         """
@@ -221,8 +227,7 @@ class MedicalRetriever:
                 continue
                 
             chunk = self.chunks[idx]
-            meta = self.metadata[idx]
-            
+
             # Apply optional category exclusion
             if self.exclude_categories and str(chunk.get('category', '')).strip() in self.exclude_categories:
                 continue
@@ -236,7 +241,6 @@ class MedicalRetriever:
                 'url': chunk['url'],
                 'type': chunk['type'],
                 'token_count': chunk['token_count'],
-                'metadata': meta
             }
             # Include RxNorm identifiers when present
             if 'rxcui' in chunk:
@@ -266,6 +270,112 @@ class MedicalRetriever:
         
         # Return top-k
         return prelim_results[:k]
+
+    def _result_from_chunk(self, chunk: Dict, score: float) -> Dict:
+        result = {
+            'score': float(score),
+            'chunk_id': chunk.get('id'),
+            'text': chunk.get('text', ''),
+            'source': chunk.get('source', ''),
+            'category': chunk.get('category', ''),
+            'url': chunk.get('url', ''),
+            'type': chunk.get('type', ''),
+            'token_count': chunk.get('token_count'),
+        }
+        if 'rxcui' in chunk:
+            result['rxcui'] = chunk.get('rxcui')
+        if chunk.get('type') == 'QA_pair':
+            result['question'] = chunk.get('question')
+            result['answer'] = chunk.get('answer')
+        return result
+
+    @staticmethod
+    def _contextual_text(chunk: Dict) -> str:
+        """Contextual Retrieval (lexical half): prepend each chunk's situating
+        context (source / category / question) before indexing, so exact terms
+        from the surrounding document are matchable. Free — no LLM needed."""
+        parts = [chunk.get('context'), chunk.get('source'),
+                 chunk.get('category'), chunk.get('question')]
+        ctx = " | ".join(str(p) for p in parts if p)
+        body = chunk.get('text') or ''
+        return (ctx + " . " + body) if ctx else body
+
+    def _ensure_bm25(self):
+        """Lazily build/load the sparse BM25 index over the chunk texts."""
+        if getattr(self, "_bm25", None) is not None:
+            return self._bm25
+        from services.hybrid_retriever import build_or_load_bm25
+        contextual = str(os.getenv("HEALIX_CONTEXTUAL", "1")).lower() in ("1", "true", "yes")
+        if contextual:
+            texts = [self._contextual_text(c) for c in self.chunks]
+            cache = str(self.index_dir / "bm25_context.pkl")
+        else:
+            texts = [(c.get('text') or '') for c in self.chunks]
+            cache = str(self.index_dir / "bm25_index.pkl")
+        self._bm25 = build_or_load_bm25(texts, cache)
+        return self._bm25
+
+    def hybrid_retrieve(self, query: str, k: int = 10, min_score: float = 0.0,
+                        dense_pool: int = 50, sparse_pool: int = 50) -> List[Dict]:
+        """Hybrid retrieval: dense (FAISS) + sparse (BM25) fused with Reciprocal
+        Rank Fusion, then optional cross-encoder rerank. Falls back to dense-only
+        if the sparse index is unavailable."""
+        if not query.strip():
+            return []
+
+        # Dense arm
+        if self.model is None:
+            self._load_model()
+        qv = self.model.encode([query], convert_to_numpy=True)
+        faiss.normalize_L2(qv)
+        dscores, dind = self.index.search(qv.astype(np.float32), dense_pool)
+        dense_ids = [int(i) for i in dind[0] if i != -1]
+        dense_score = {int(i): float(s) for i, s in zip(dind[0], dscores[0]) if i != -1}
+
+        # Sparse arm (graceful)
+        sparse_ids: List[int] = []
+        try:
+            sids, _ = self._ensure_bm25().query(query, top_n=sparse_pool)
+            sparse_ids = [int(i) for i in sids]
+        except Exception as e:
+            print(f"[hybrid] BM25 unavailable ({e}); dense-only this query")
+
+        # Fuse
+        if sparse_ids:
+            from services.hybrid_retriever import reciprocal_rank_fusion
+            fused = reciprocal_rank_fusion([dense_ids, sparse_ids])
+        else:
+            fused = dense_ids
+
+        pool_size = max(k, self.reranker_topn) if (self.reranker is not None or self.reranker_model_name) else max(k * 3, k)
+        results: List[Dict] = []
+        for idx in fused:
+            if idx < 0 or idx >= len(self.chunks):
+                continue
+            chunk = self.chunks[idx]
+            if self.exclude_categories and str(chunk.get('category', '')).strip() in self.exclude_categories:
+                continue
+            results.append(self._result_from_chunk(chunk, dense_score.get(idx, 0.0)))
+            if len(results) >= pool_size:
+                break
+
+        # Optional rerank (reuse cross-encoder if configured)
+        if self.reranker is None and self.reranker_model_name:
+            try:
+                self._load_reranker()
+            except Exception:
+                self.reranker = None
+        if self.reranker is not None and results:
+            try:
+                pairs = [[query, r['text']] for r in results]
+                rr = self.reranker.predict(pairs, batch_size=self.reranker_batch, show_progress_bar=False)
+                for r, s in zip(results, rr):
+                    r['rerank'] = float(s)
+                results.sort(key=lambda x: x.get('rerank', 0.0), reverse=True)
+            except Exception as e:
+                print(f"[hybrid] rerank failed: {e}")
+
+        return results[:k]
 
     def search_by_category(self, query: str, category: str, k: int = 2, min_score: float = 0.0) -> List[Dict]:
         """Retrieve top-k passages restricted to a specific category (exact match)."""

@@ -1,9 +1,13 @@
-# Pinned requirements for Healix / Baymax.v1
-# Generated from current working environment (curated)
+# Pinned RUNTIME requirements for Healix (web app + retrieval + inference).
+# Generated from current working environment (curated).
+# Training-only deps (LoRA/SFT) live in requirements-train.txt.
+#
+# LLM: Healix uses a local Ollama server by default (install Ollama separately and
+# `ollama pull llama3`). The old bundled GGUF stack (gpt4all, llama-cpp-python) was
+# removed; set BAYMAX_LLM_BACKEND= and reinstall those only if you want the
+# offline GGUF fallback.
 
-# Core
-gpt4all==2.8.2
-streamlit==1.50.0
+# Web app
 uvicorn==0.37.0
 fastapi==0.118.0
 python-dotenv==1.1.1
@@ -20,9 +24,13 @@ tqdm==4.67.1
 
 # Retrieval (CPU)
 faiss-cpu==1.12.0
+scikit-learn==1.7.2   # sparse BM25 arm for hybrid retrieval
 
-# LLM backends
-llama-cpp-python==0.3.4
+# Computer vision (medical imaging — chest X-ray pathology analysis)
+torchxrayvision==1.4.0
+scikit-image==0.26.0
+pydicom==3.0.2
+pillow==11.0.0
 
 # Utilities
 diskcache==5.6.3

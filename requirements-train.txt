@@ -1,0 +1,11 @@
+# Healix TRAINING-ONLY dependencies (LoRA / SFT pipeline).
+# Not needed to run the app — only for scripts/train_sft.py and scripts/merge_lora.py.
+# Install on top of the runtime env:  pip install -r requirements.txt -r requirements-train.txt
+# Versions intentionally unpinned: install builds compatible with the runtime's
+# transformers 4.57 / torch 2.6 (+cu124).
+
+peft
+trl
+datasets
+accelerate
+bitsandbytes

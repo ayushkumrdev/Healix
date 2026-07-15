@@ -30,7 +30,7 @@ set BAYMAX_GEN_SHORT_TOKENS=256
 
 rem Optional: Enable token allocation debug info
 rem set BAYMAX_DEBUG_TOKENS=1
-set BAYMAX_GEN_CONTEXT=4096
+set BAYMAX_GEN_CONTEXT=8192
 set BAYMAX_GEN_STREAM=true
 
 rem Model paths
@@ -48,7 +48,7 @@ rem Threads (compat vars)
 set BAYMAX_GPT4ALL_THREADS=12
 
 rem Generation tuning
-set BAYMAX_GEN_TEMP=0.8
+set BAYMAX_GEN_TEMP=0.4
 set BAYMAX_GEN_TOP_K=10
 set BAYMAX_GEN_TOP_P=0.9
 set BAYMAX_GEN_STYLE=abstractive
@@ -76,12 +76,30 @@ set "PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin;%PATH%"
 rem Enable XAI (explainability package)
 set BAYMAX_ENABLE_XAI=1
 
+rem Conversation memory (persistent multi-chat history + per-turn recall window)
+set BAYMAX_MEMORY_TURNS=10
+set BAYMAX_MEMORY_CHARS=2400
+
+rem Agentic Mixture-of-Experts routing (HEALIX_MOE=0 to disable / A-B test)
+set HEALIX_MOE=1
+
+rem Hybrid retrieval: dense (FAISS) + sparse (BM25) fused with RRF
+set HEALIX_HYBRID=1
+rem HyDE query expansion + RAPTOR overview tree (fail-open if artifacts absent)
+set HEALIX_HYDE=1
+set HEALIX_RAPTOR=1
+
+rem LLM backend: use the local Ollama server (clear BAYMAX_LLM_BACKEND for GGUF)
+set BAYMAX_LLM_BACKEND=ollama
+set BAYMAX_OLLAMA_URL=http://localhost:11434
+set BAYMAX_OLLAMA_MODEL=qwen2.5:7b-instruct
+
 rem Streamlit settings (use defaults for security)
 rem set STREAMLIT_SERVER_ENABLECORS=false
 rem set STREAMLIT_SERVER_ENABLEXSRFPROTECTION=false
 rem set STREAMLIT_BROWSER_GATHERERUSAGESTATS=false
 
-rem Port for Streamlit UI
+rem Port for the Healix web app
 if not defined BAYMAX_PORT set BAYMAX_PORT=8504
 
 rem Check for virtual environment Python
@@ -104,8 +122,9 @@ if defined BAYMAX_GGUF_MODEL_DIR  echo Model Dir    : %BAYMAX_GGUF_MODEL_DIR%
 echo UI Port      : %BAYMAX_PORT%
 echo.
 
-rem Start Streamlit UI (foreground) - Professional UI
-".venv\Scripts\python.exe" -m streamlit run "frontend\app_professional.py" --server.port %BAYMAX_PORT% --server.runOnSave false
+rem Start the Healix web app (FastAPI + custom chat UI) in the foreground
+echo Open http://127.0.0.1:%BAYMAX_PORT% in your browser
+".venv\Scripts\python.exe" -m uvicorn backend.api:app --host 127.0.0.1 --port %BAYMAX_PORT%
 
 rem Return to original directory
 popd

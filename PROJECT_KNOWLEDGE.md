@@ -1,995 +1,485 @@
-# 🏥 HEALIX (BAYMAX.V1) - COMPREHENSIVE PROJECT KNOWLEDGE
+# Healix — Project Knowledge (canonical)
 
-**Last Updated:** November 2, 2025  
-**Project Status:** Operational - Production-Ready Minimal Chat UI  
-**Architecture:** Local-First Medical AI System
+**Last updated:** June 5, 2026
+**Status:** Operational, local-first medical reasoning companion
 
----
+This is the single source of truth for how Healix works. It supersedes the
+former `HEALIX_FULL_KNOWLEDGE.txt` and `CHECKPOINT.md` (now removed) and the
+older draft of this file, both of which had drifted from the running system.
 
-## 📋 TABLE OF CONTENTS
-
-1. [Project Overview](#project-overview)
-2. [System Architecture](#system-architecture)
-3. [Core Components](#core-components)
-4. [Data & Knowledge Base](#data--knowledge-base)
-5. [Configuration & Environment](#configuration--environment)
-6. [User Interfaces](#user-interfaces)
-7. [Safety & Clinical Features](#safety--clinical-features)
-8. [Performance Optimization](#performance-optimization)
-9. [Deployment & Operations](#deployment--operations)
-10. [Development History](#development-history)
-11. [Known Limitations](#known-limitations)
-12. [Future Roadmap](#future-roadmap)
+> Naming note: the project was originally "Baymax.v1". Every environment
+> variable is still prefixed `BAYMAX_`. Healix is the product name.
 
 ---
 
-## 🎯 PROJECT OVERVIEW
+## 1. What it is
 
-### Mission
-Transform Healix from a demo system into a **world-class, ChatGPT-level healthcare AI assistant** with comprehensive medical knowledge, while maintaining 100% local processing for privacy.
+A local-first medical companion that runs entirely on the user's device. It
+combines:
 
-### Key Features
-- **🧠 Advanced AI:** Mistral-7B-Instruct (Q4_K_M) for medical reasoning
-- **📚 Large Knowledge Base:** 239,644 medical document chunks indexed
-- **🔍 Semantic Retrieval:** FAISS vector search with BAAI/bge-base-en-v1.5 embeddings
-- **⚕️ Clinical NER:** Symptom extraction with biomedical BERT
-- **🚨 Emergency Detection:** Multi-category severity scoring system
-- **🔒 Privacy-First:** 100% local processing, no external API calls
-- **⚡ Streaming UI:** ChatGPT-like minimal interface with real-time responses
-
-### Project Structure
-```
-baymax.v1/
-├── backend/
-│   └── services/          # Core services
-│       ├── advanced_orchestrator.py    # Main LLM orchestration
-│       ├── retriever.py                # FAISS retrieval service
-│       ├── symptom_extractor.py        # Clinical NER
-│       ├── safety_eval.py              # Safety monitoring
-│       ├── audit.py                    # Audit logging
-│       ├── clinical_safety.py          # Safety checks (stubs)
-│       ├── medication_support.py       # Medication reasoning
-│       ├── config.py                   # Centralized config
-│       └── xai.py                      # Explainability package
-├── frontend/
-│   └── app_professional.py   # Professional UI (ACTIVE)
-├── scripts/
-│   ├── build_faiss.py               # FAISS index builder
-│   ├── chunk_documents.py           # Document chunking
-│   ├── e2e_smoke.py                 # End-to-end testing
-│   ├── ingest_*.py                  # Data ingestion scripts
-│   └── download_*.py                # Data download utilities
-├── data/
-│   ├── index.faiss              # FAISS vector index (736 MB)
-│   ├── indexed_chunks.pkl       # Document chunks (206 MB)
-│   ├── faiss_metadata.pkl       # Metadata (131 MB)
-│   └── index_config.json        # Index configuration
-├── artifacts/
-│   └── mistral-7b-instruct-v0.2.Q4_K_M.gguf  # LLM model (4.4 GB)
-├── logs/                     # Audit and safety logs
-├── datasets/                 # Raw medical datasets
-├── data/                     # Processed data
-│   ├── rxnorm/              # RxNorm drug vocabulary
-│   ├── enhanced/            # Enhanced medical data
-│   ├── meds/                # Medication database
-│   └── processed/           # Processed chunks
-├── start_system.bat         # Windows launcher script
-├── demo_chat.py             # CLI demo interface
-└── CHECKPOINT.md            # Project status checkpoint
-```
+- Retrieval-Augmented Generation (RAG) over a FAISS index of ~240k medical chunks
+- Optional cross-encoder reranking (MiniLM)
+- A summarization (abstraction) pass that fuses the top hits into one understanding
+- A single external prompt template (`healix_main_prompt.txt`) as the source of truth
+- Calm, human-paced, psychophysiology-aware explanations — no legal disclaimers,
+  no emergency directives
+- GPU-accelerated llama.cpp (cuBLAS) preferred, GPT4All (CPU) fallback
+- An agentic Mixture-of-Experts router over medical specialties (see RESEARCH.md)
+- A custom web app (FastAPI + streaming + hand-built chat UI) with persistent
+  multi-conversation history and multi-modality medical imaging
 
 ---
 
-## 🏗️ SYSTEM ARCHITECTURE
+## 2. Architecture
 
-### High-Level Flow
 ```
-User Input
-    ↓
-[Emergency Detection] → Emergency Alert (if critical)
-    ↓
-[Intent Routing] → medication | symptom | reasoning | general
-    ↓
-[Symptom Extraction] (Clinical NER)
-    ↓
-[Knowledge Retrieval] (FAISS + Embeddings)
-    ↓
-[LLM Generation] (Mistral-7B streaming)
-    ↓
-[Safety Checks] + [Audit Logging]
-    ↓
-Streaming Response → User
+User input (+ optional image)
+   -> scope gate (medical-only domain guard; greetings/identity/out-of-scope
+      answered instantly with canned lines, no retrieval, no LLM)
+   -> [image] vision analysis (chest X-ray / skin) -> findings
+   -> MoE gate -> top-k specialist experts (+ modality affinity)
+   -> per-expert lens retrieval (multi-query) -> pooled evidence
+   -> prompt composition (single template + panel directive + findings)
+   -> LLM generation (llama.cpp GPU, else GPT4All), streamed via SSE
+   -> persist turn (conversation_store) -> response + routing + findings
 ```
 
-### Technology Stack
-
-**Backend**
-- **LLM:** GPT4All (Mistral-7B-Instruct Q4_K_M, 4.4 GB)
-- **Vector Search:** FAISS (IndexFlatIP, 768-dim, 239K vectors)
-- **Embeddings:** sentence-transformers (BAAI/bge-base-en-v1.5)
-- **NER:** Hugging Face transformers (samrawal/bert-base-uncased_clinical-ner)
-- **Framework:** Python 3.x
-
-**Frontend**
-- **UI:** Streamlit (professional interface)
-- **Deployment:** Local server (default port 8504)
-
-**Data Processing**
-- **Storage:** Pickle (PKL) for chunks/metadata, JSONL for raw data
-- **Chunking:** Smart document segmentation for Q&A pairs, medications, and clinical guidelines
+- **Web app:** `backend/api.py` (FastAPI) serves `frontend/web/` (custom
+  `index.html` / `styles.css` / `app.js`) and exposes SSE chat, conversation CRUD,
+  and `/api/info`. The UI is a ChatGPT/Claude-style chat: persistent history
+  sidebar, inline "+" image attach, expert chips, findings bars, copy buttons.
+- **Conversations:** `backend/conversation_store.py` — JSON-per-conversation
+  persistence so history survives restarts and provides model context.
+- **MoE router:** `backend/services/moe_router.py` — embedding-gated sparse routing
+  to specialist experts + lens-conditioned retrieval (see RESEARCH.md).
+- **Orchestrator:** `backend/services/advanced_orchestrator.py` — loads the one
+  prompt template, composes prompts (evidence + image findings + expert directive)
+  for streaming and non-streaming, handles identity/greeting, optional XAI.
+- **Retriever:** `backend/services/retriever.py` — FAISS search + optional
+  cross-encoder rerank; lazy-loads the embedding model and reranker.
+- **Vision:** `backend/services/vision.py` — local multi-modality image analysis,
+  chest X-ray + skin lesion, auto-routed (see section 4a).
+- **Aux services:** `safety_eval.py` (internal risk/audit), `audit.py`
+  (JSONL logging), `medication_support.py` (FastAPI clinician/prescription
+  decision-support flow), `xai.py` (explainability), `symptom_extractor.py`
+  (optional clinical NER, not required at runtime), `config.py` (fallback defaults).
 
 ---
 
-## 🔧 CORE COMPONENTS
+## 3. Single main prompt (source of truth)
 
-### 1. Advanced Medical Orchestrator (`backend/services/advanced_orchestrator.py`)
+- File: `healix_main_prompt.txt` (project root). Edit it to change behavior
+  instantly — there is no large embedded prompt in code.
+- Wiring: `start_system.bat` and `scripts/run_frontend.ps1` set
+  `BAYMAX_MAIN_PROMPT_FILE` to this path. The orchestrator loads it via
+  `_load_main_prompt_template()` and fills it with `_compose_main_prompt()` for
+  both streaming and non-streaming paths.
+- Placeholders: `{CONVERSATION_MEMORY}`, `{EVIDENCE_BLOCK}`, `{SYMPTOM_LINE}`,
+  `{USER_QUESTION}`, optional `{REASONING_SUMMARY_INSTRUCTION}`. The template
+  is filled via `format_map` with a safe dict — never put other literal
+  `{braces}` in it. A `<<<USER TURN>>>` line splits system vs user content
+  (see section 5).
 
-**Purpose:** Main LLM reasoning engine with ChatGPT-level medical expertise
-
-**Key Features:**
-- **Model:** Mistral-7B-Instruct (Q4_K_M) via GPT4All
-- **Thread Safety:** Singleton pattern with generation lock
-- **Intent Routing:** medication | symptom | reasoning | general
-- **Emergency Detection:** Multi-category severity scoring (8 categories)
-- **Query Classification:** differential_diagnosis | treatment_planning | drug_information | general
-- **Streaming Support:** Token-by-token generation for responsive UI
-- **Generation Modes:**
-  - Abstractive: Paraphrase with higher temperature (0.8)
-  - Extractive: Lower temperature (0.2) for factual responses
-- **Fast Mode:** Dynamic token limits (80-320) based on query length
-- **Context Management:** Prompt truncation to fit 4096-token context window
-
-**Environment Variables:**
-- `BAYMAX_GGUF_MODEL_NAME` - Model filename
-- `BAYMAX_GGUF_MODEL_DIR` - Model directory path
-- `BAYMAX_GEN_THREADS` - CPU threads (default: 12)
-- `BAYMAX_GEN_TOKENS` - Max tokens (default: 320)
-- `BAYMAX_GEN_TEMP` - Temperature (default: 0.8)
-- `BAYMAX_GEN_STYLE` - abstractive | extractive
-- `BAYMAX_FAST_MODE` - Enable speed optimizations
-- `BAYMAX_GENERATE_ALL` - Force generation even for greetings
-- `BAYMAX_NO_FALLBACKS` - Disable fallback responses
-- `BAYMAX_POST_ABSTRACT` - Enable paraphrase post-pass (disabled by default)
-
-**Emergency Categories:**
-1. Cardiac (chest pain, heart attack, etc.)
-2. Respiratory (breathing difficulty, choking, etc.)
-3. Neurological (stroke, seizure, etc.)
-4. Trauma (bleeding, injuries, etc.)
-5. Allergic (anaphylaxis, swelling, etc.)
-6. Mental Health (suicide ideation, etc.)
-7. Metabolic (diabetic coma, etc.)
-8. Obstetric (pregnancy complications, etc.)
-
-**Severity Levels:**
-- **CRITICAL:** Score ≥10, immediate 911 call
-- **HIGH:** Score ≥7, urgent ED visit
-- **MODERATE:** Score ≥3, prompt medical evaluation
-- **LOW:** Score <3, routine care
-
-### 2. Medical Retriever (`backend/services/retriever.py`)
-
-**Purpose:** Fast semantic search over medical knowledge base
-
-**Key Features:**
-- **Index:** FAISS IndexFlatIP (inner product, normalized L2 for cosine similarity)
-- **Embeddings:** BAAI/bge-base-en-v1.5 (768-dim)
-- **Memory-Mapped Loading:** Fast startup with IO_FLAG_MMAP
-- **LRU Cache:** Query embedding cache (default: 256 entries)
-- **GPU Support:** Optional FAISS GPU offload (via BAYMAX_FAISS_GPU=1)
-- **Reranker Support:** Optional cross-encoder reranking (disabled for speed)
-- **Category Filtering:** Optional exclusion via BAYMAX_RETRIEVER_EXCLUDE_CATEGORIES
-
-**Performance:**
-- **Similarity Scores:** 50-78% for relevant medical queries
-- **Retrieval Time:** ~0.1-0.5s for k=5
-- **Cache Hit Rate:** High for repeated queries
-
-**Environment Variables:**
-- `BAYMAX_EMBEDDING_MODEL` - Embedding model name
-- `BAYMAX_RERANKER` - Cross-encoder model (set to "none" for speed)
-- `BAYMAX_RERANK_TOPN` - Pre-retrieval size for reranking
-- `BAYMAX_FAISS_GPU` - Enable GPU offload (0/1)
-- `BAYMAX_CUDA_DEVICE` - GPU device ID
-- `BAYMAX_EMBED_CACHE` - Cache size (default: 256)
-
-### 3. Symptom Extractor (`backend/services/symptom_extractor.py`)
-
-**Purpose:** Clinical NER for medical entity extraction
-
-**Key Features:**
-- **Model:** samrawal/bert-base-uncased_clinical-ner
-- **Pipeline:** Hugging Face NER pipeline with aggregation
-- **Hybrid Approach:** NER + rule-based keyword matching
-- **Entity Categories:** pain, fever, respiratory, GI, neurological, cardiovascular, dermatological
-- **Duration Extraction:** Regex patterns for "3 days", "since yesterday", etc.
-- **Severity Detection:** Mild, moderate, severe indicators
-- **LRU Cache:** Result cache (default: 64 entries) for speed
-
-**Extraction Output:**
-```python
-{
-    "text": "original query",
-    "cleaned_text": "normalized text",
-    "symptoms": [{"text": "headache", "label": "SYMPTOM", "confidence": 0.95}],
-    "duration": [{"text": "3 days", "value": 3, "unit": "days"}],
-    "severity": [{"text": "severe", "severity": "high"}],
-    "entities_count": 5,
-    "extraction_method": "hybrid"
-}
-```
-
-### 4. Safety & Audit Systems
-
-**Safety Evaluator (`safety_eval.py`):**
-- Audit logging to `logs/audit_YYYYMMDD.log`
-- Session statistics tracking
-- Emergency pattern detection
-- Risk level assessment (low/moderate/high/critical)
-- Interaction hashing for privacy
-
-**Audit Logger (`audit.py`):**
-- Lightweight JSONL logging to `logs/audit_log.jsonl`
-- Timestamp + event + payload tracking
-- No blocking on write failures
-
-**Clinical Safety Checks (`clinical_safety.py`):**
-- Allergy checking (stub)
-- Drug interaction detection (stub)
-- Contraindication checking (stub)
-- Formulary validation (stub)
-- **Note:** Stubs for future integration with real clinical databases
-
-### 5. User Interfaces
-
-**Professional UI (`frontend/app_professional.py`)** - ACTIVE
-- Modern professional design with enhanced styling and animations
-- Streaming responses with dynamic token allocation
-- Emergency alerts with severity and action guidance
-- Medication intent → DRAFT output (decision support only)
-- Sidebar with stats, toggles for timings and sources
-- Cached service loading (@st.cache_resource)
-- Clear loading indicators to avoid "stuck" UI
-
-**CLI Demo (`demo_chat.py`)**
-- Interactive command-line interface
-- Batch demo mode
-- Session statistics
-- Health checks for all services
-- Example queries and history tracking
+Behavioral highlights (see the prompt file for the full directive): conversational
+humanity tone, psychophysiology awareness (sympathetic/parasympathetic/vagal/HPA),
+personal-baseline reasoning, intervention-trial tracking, optional one-line causal
+chain, references only when explicitly requested (no URLs/brackets), no emojis,
+no exclamation marks.
 
 ---
 
-## 📊 DATA & KNOWLEDGE BASE
+## 4. Retrieval & evidence
 
-### FAISS Index Statistics
-- **Total Vectors:** 239,644
-- **Dimension:** 768
-- **Index Type:** IndexFlatIP (inner product)
-- **Index Size:** 736 MB
-- **Chunks Size:** 206 MB (full text)
-- **Metadata Size:** 131 MB
-- **Created:** October 12, 2025
+- **Index:** `data/index.faiss` — `IndexScalarQuantizer` (SQ8, inner product),
+  768-dim, **239,644 vectors, ~175 MB**. Originally an `IndexFlatIP` (~736 MB);
+  shrunk in-place to 8-bit scalar quantization via
+  `scripts/shrink_faiss_index.py` (98.6% top-10 recall vs flat, mean score error
+  1.7e-4 — negligible, so the score thresholds below stay valid). Loaded with
+  `IO_FLAG_MMAP`.
+- **Embeddings:** `BAAI/bge-base-en-v1.5` (768-dim), GPU if available.
+- **Chunks:** `data/indexed_chunks.pkl` (~197 MB) holds the full passage text.
+  `faiss_metadata.pkl` was removed — it duplicated chunk fields and was never read
+  at runtime. The retriever loads it only if present.
+- **Reranking:** `cross-encoder/ms-marco-MiniLM-L-6-v2`, lazy-loaded, pre-pool
+  `BAYMAX_RERANK_TOPN`, batch `BAYMAX_RERANK_BATCH`; skipped when the top FAISS
+  score exceeds `BAYMAX_RERANK_SKIP_THRESHOLD` (0.86). Set `BAYMAX_RERANKER=none`
+  to disable.
+- **Hybrid retrieval (`HEALIX_HYBRID=1`):** `hybrid_retrieve` fuses dense FAISS
+  with a sparse **BM25** index (`backend/services/hybrid_retriever.py`, a
+  scikit-learn sparse matrix, cached under `data/`) using **Reciprocal Rank
+  Fusion**, then reranks. Catches exact terms (drug names, rare conditions) dense
+  search blurs. Used by the MoE per-expert lens queries and the fallback path.
+- **Contextual Retrieval (`HEALIX_CONTEXTUAL=1`):** the BM25 arm is built over
+  *context-enriched* chunks — each chunk is prefixed with its situating context
+  (source / category / question) before indexing (the free, lexical half of
+  Anthropic's Contextual Retrieval; the LLM-context dense pass is the roadmap in
+  RESEARCH.md §8). Cached to `data/bm25_context.pkl`.
+- **Summarization:** the non-streaming path summarizes the top hits into one
+  integrated understanding injected as `{EVIDENCE_BLOCK}`; the streaming path uses
+  compact evidence lines for latency.
+- **Score thresholds:** retrieval filters on absolute cosine scores
+  (`min_score`, default 0.25 from the UI; rerank skip 0.86). This is why the index
+  uses scalar quantization (near-exact scores) rather than lossy product
+  quantization, which would shift these scores.
 
-### Data Sources
-```json
-{
-  "chunks_files": [
-    "all_chunks.jsonl",         // General medical Q&A
-    "chunks.jsonl",             // MedQuAD dataset
-    "drug_chunks.jsonl",        // Medication information
-    "pubmedqa_chunks.jsonl"     // PubMed Q&A pairs
-  ]
-}
-```
+**Data sources in the index:** MedQuAD (~47k Q&A, NIH/NLM), PubMedQA, drug info,
+plus a small set of enhanced/medication entries. RxNorm is partially integrated
+(`scripts/ingest_rxnorm.py`, `integrate_rxnorm.py`).
 
-### Dataset Details
-
-**1. MedQuAD** ✅ INTEGRATED
-- ~47,000 medical Q&A pairs
-- Source: NIH/NLM authoritative datasets
-- Categories: diseases, symptoms, treatments, diagnostics
-
-**2. PubMedQA** ✅ INTEGRATED
-- Biomedical research question-answer pairs
-- Evidence-based clinical information
-- PubMed abstracts and full-text articles
-
-**3. Drug Information** ✅ INTEGRATED
-- Medication names, indications, dosing
-- Side effects and contraindications
-- Drug interactions and safety information
-
-**4. RxNorm** 🔄 PARTIALLY INTEGRATED
-- Normalized drug vocabulary
-- Drug mapping and terminology
-- Files: `data/rxnorm/RXNCONSO.RRF` (requires licensing from NIH)
-
-**5. DailyMed SPL** 🔄 PLANNED
-- Official FDA drug labels
-- Structured Product Labeling (SPL) format
-
-**6. Clinical Guidelines** 🔄 PLANNED
-- WHO, CDC, NICE recommendations
-- Treatment protocols
-- Evidence-based best practices
-
-### Data Directory Structure
-```
-data/
-├── index.faiss                    # Main FAISS index
-├── indexed_chunks.pkl             # Document chunks with text
-├── faiss_metadata.pkl             # Chunk metadata
-├── index_config.json              # Index configuration
-├── chunks/                        # Raw JSONL chunks
-│   ├── all_chunks.jsonl
-│   ├── chunks.jsonl
-│   ├── drug_chunks.jsonl
-│   └── pubmedqa_chunks.jsonl
-├── rxnorm/                        # RxNorm data
-│   └── RXNCONSO.RRF
-├── enhanced/                      # Enhanced datasets
-├── meds/                          # Medication database
-└── processed/                     # Processed data
-```
+> The original `data/chunks/*.jsonl` sources are no longer on disk, so
+> `scripts/build_faiss.py` cannot rebuild from scratch. `shrink_faiss_index.py`
+> works by reconstructing vectors directly from the existing index, and the chunk
+> text survives in `indexed_chunks.pkl`.
 
 ---
 
-## ⚙️ CONFIGURATION & ENVIRONMENT
+## 4a. Medical computer vision (imaging)
 
-### Environment Variables (Full List)
+`backend/services/vision.py` adds local, multi-modality medical image analysis.
+Images are **auto-routed** by a saturation heuristic (grayscale → radiograph,
+colorful → skin/derm photo) or by an explicit `modality` argument.
 
-**Model & Generation**
-```bash
-BAYMAX_GGUF_MODEL_NAME=mistral-7b-instruct-v0.2.Q4_K_M.gguf
-BAYMAX_GGUF_MODEL_DIR=artifacts
-BAYMAX_GEN_THREADS=12              # CPU threads
-BAYMAX_GEN_TOKENS=320              # Max tokens per response
-BAYMAX_GEN_MAX_TOKENS=320          # Alias for TOKENS
-BAYMAX_GEN_SHORT_TOKENS=160        # Tokens for short queries
-BAYMAX_GEN_CONTEXT=4096            # Context window size
-BAYMAX_GEN_TEMP=0.8                # Temperature (0.0-2.0)
-BAYMAX_GEN_TOP_K=10                # Top-K sampling
-BAYMAX_GEN_TOP_P=0.9               # Nucleus sampling
-BAYMAX_GEN_STYLE=abstractive       # abstractive | extractive
-BAYMAX_GEN_STREAM=true             # Enable streaming
+- **Chest X-ray:** TorchXRayVision `densenet121-res224-all` — a peer-reviewed
+  DenseNet (NIH/PadChest/CheXpert/MIMIC/…) estimating 18 thoracic pathologies
+  (atelectasis, cardiomegaly, consolidation, edema, effusion, emphysema, fibrosis,
+  fracture, hernia, infiltration, lung lesion, lung opacity, mass, nodule, pleural
+  thickening, pneumonia, pneumothorax, …).
+- **Skin lesion:** a Hugging Face image-classification model
+  (`HEALIX_SKIN_MODEL`, default `Anwarkh1/Skin_Cancer-Image_Classification`),
+  loaded via `transformers` pipeline.
+- **Flow:** the vision model performs *perception* (what is visible) and returns
+  a structured findings list + a compact `prompt_block`. That block is injected
+  into the LLM prompt via `prepare_stream_prompt(..., image_findings=...)`, so the
+  text pipeline *explains* the findings in Healix's calm voice, grounded by RAG.
+- **Safeguards:** a saturation heuristic rejects non-radiograph images
+  (calibrated for chest X-rays); everything degrades gracefully — if the library
+  or weights are missing, analysis returns an "unavailable" result instead of
+  raising, so the app never breaks. Findings are framed as screening estimates,
+  not diagnoses.
+- **Runtime:** lazy-loaded and cached; uses GPU if available. Weights (~tens of
+  MB) download once to `~/.torchxrayvision/` then run offline. The download
+  progress bar is redirected to an in-memory buffer to avoid a Windows console
+  Unicode crash.
+- **UI:** images are attached inline via the chat composer's "+" button. The
+  image appears as a thumbnail in the user's message, the findings render as
+  probability bars in the reply, and the model explains them.
+- **Smoke test:** `python scripts/check_vision.py`.
+
+---
+
+## 4b. Agentic Mixture-of-Experts (MoME)
+
+`backend/services/moe_router.py` adds a system-level sparse MoE over medical
+specialists (Cardiology, Pulmonology, Neurology, Dermatology, Gastroenterology,
+Pharmacology, Psychophysiology, General).
+
+- **Gate:** cosine similarity between the query embedding and per-expert prototype
+  embeddings, plus keyword priors and an imaging-modality affinity, sharpened by a
+  softmax temperature; the top-k (default 2) experts above a floor are activated.
+- **Experts:** each activated expert reformulates the query through its retrieval
+  *lens* and pulls specialty-specific evidence (multi-query expansion); the union
+  grounds one synthesis pass framed as an integrated panel (`expert_directive`).
+- **Explainability:** the activated experts and gate weights stream to the UI as
+  "Consulted" chips and are persisted on each reply.
+- **Config:** `HEALIX_MOE=1` (default; `0` to A/B against plain RAG),
+  `HEALIX_MOE_TOPK`, `HEALIX_MOE_TEMP`. Smoke test: `python scripts/check_moe.py`.
+- **Full design, novelty, and evaluation plan:** see `RESEARCH.md`.
+
+---
+
+## 4c. Altitude-matched retrieval: RAPTOR × HyDE
+
+Broad questions need evidence no single chunk contains. Two coupled upgrades
+(full design + novelty: RESEARCH.md §9):
+
+- **HyDE (`backend/services/hyde.py`, `HEALIX_HYDE=1`):** one ~4 s Ollama call
+  per medical query drafts what a reference text would say at two abstraction
+  levels — a SPECIFIC clinical-detail line and a BROAD topic line. The specific
+  line is appended to the leaf search query (dense + BM25 + MoE lenses); the
+  broad line searches the RAPTOR tree. Fail-open: on any error retrieval uses
+  the raw query.
+- **RAPTOR tree (`scripts/build_raptor.py` offline, `backend/services/raptor.py`
+  runtime, `HEALIX_RAPTOR=1`):** k-means over leaf embeddings (reconstructed
+  from the SQ8 index) → ~1,500 topic nodes summarized by the local model
+  (largest-first, resumable JSONL) → ~120 domain nodes. Artifacts:
+  `data/raptor.faiss` + `data/raptor_nodes.pkl`. Top overview nodes are
+  prepended to the evidence block as "Healix knowledge tree" passages.
+- **Build:** `python scripts/build_raptor.py --topics 1500 --domains 120`
+  (~2 h local Ollama time, resumable; `--cap N` for partial runs,
+  `--finalize-only` to re-embed whatever nodes exist).
+
+---
+
+## 4d. Medical-only scope gate
+
+`backend/services/scope_gate.py` resolves every message to `greeting | thanks |
+farewell | identity | out_of_scope | medical` before any retrieval or
+generation. Courtesy kinds and clear non-medical asks (code, trivia, sports,
+finance, entertainment, travel, ...) stream a canned house-voice line over the
+same SSE contract with zero model time; only `medical` runs the full pipeline.
+
+- **Precision-first refusals:** word-boundary matching only (the old substring
+  check classified "hip pain" as a greeting via "hi"); broad medical vocabulary
+  always wins; short mid-conversation follow-ups are never refused.
+- **Embedding tiebreaker:** for ambiguous standalone messages the gate reuses
+  the retriever's encoder against medical vs non-medical anchor prototypes and
+  refuses only with a clear margin. Any failure degrades to `medical`.
+- **Defense in depth:** `healix_main_prompt.txt` carries a strict
+  "Domain" directive so anything that slips through is declined by the LLM;
+  the non-streaming path (`synthesize_advanced_response`) also applies
+  `_is_healthcare_topic` -> polite refusal.
+- Smoke test: `python scripts/check_scope.py` (add `--full` to exercise the
+  embedding tiebreaker).
+
+---
+
+## 5. Generation, streaming, fallbacks
+
+- One prompt composition for both paths via `_compose_main_prompt`.
+- The template contains a `<<<USER TURN>>>` divider: text above it is sent to
+  Ollama as the **system message** (stronger instruction adherence), text below
+  (memory, evidence, question) as the user prompt. Backends without a system
+  slot strip the marker. The Ollama payload also pins `num_ctx` (from
+  `BAYMAX_GEN_CONTEXT`) so long prompts are never silently truncated from the
+  top, and `keep_alive=30m` (`BAYMAX_OLLAMA_KEEP_ALIVE`) to avoid reload lag.
+- Token heuristics (runtime values): `GEN_MAX_TOKENS=900`, `GEN_MIN_TOKENS=60`,
+  `GEN_SHORT_TOKENS=256`, context `8192`.
+- Short follow-up messages (<8 words) are retrieved with the previous user
+  message folded into the search query (`backend/api.py`), so "what about at
+  night?" still finds on-topic evidence; the prompt itself is unchanged.
+- **Backends (pluggable):** `BAYMAX_LLM_BACKEND=ollama` (default) streams from the
+  local Ollama server (`BAYMAX_OLLAMA_MODEL`, e.g. `llama3:latest`) and **skips the
+  GGUF load entirely** — faster startup and stronger models. Ollama is now the
+  only bundled backend; the GGUF stack (`llama-cpp-python`/`gpt4all` + model) was
+  removed to save ~5.7 GB. To restore an offline GGUF fallback, reinstall those
+  packages, drop a `.gguf` in `artifacts/`, and clear `BAYMAX_LLM_BACKEND` — the
+  optional-import code paths are still in place.
+- If streaming yields zero tokens, the system falls back to a non-streaming call.
+- `config.py` holds conservative *fallback* defaults (e.g. `k=5`, `temp=0.25`)
+  used only when the corresponding env var is unset; the launchers set the real
+  runtime values below.
+
+---
+
+## 6. Safety posture (by design)
+
+- **No legal/medical disclaimers** anywhere.
+- **No emergency/urgent directives** ("call 911"); neutral phrasing only.
+  `_get_advanced_emergency_message` returns an empty string.
+- Emergency *detection* still runs internally (`_detect_advanced_emergency`) and
+  is logged to `logs/audit_log.jsonl` for analytics — it just produces no
+  user-facing alert.
+- Medication guidance: general info and classes/examples; patient-specific dosing
+  only when explicitly requested. The `medication_support.py` clinician flow emits
+  DRAFT decision-support output, not prescriptions; its allergy/interaction checks
+  are stubs awaiting real clinical-DB integration.
+
+---
+
+## 7. Configuration & launch
+
+Two launch paths exist and **must be kept in sync**:
+
+| Launcher | Sets env how | When |
+|---|---|---|
+| `start_system.bat` / `scripts/run_frontend.ps1` | exports `BAYMAX_*` before launch | normal use |
+| `.env` (via `load_dotenv`) | only fills vars **not already set** | bare `python` runs |
+
+Because `load_dotenv()` does not override existing variables, the launcher wins
+when you use it, and `.env` applies only to direct `python` invocations. As of
+this cleanup both define the same retrieval config (reranker on,
+`BAYMAX_RAG_STRICT=0`) so behavior is identical either way. See the header of
+`.env` for the precedence note.
+
+Key runtime variables (full set in `start_system.bat`): model
+`mistral-7b-instruct-v0.2.Q4_K_M.gguf` in `artifacts/`, embeddings
+`BAAI/bge-base-en-v1.5`, reranker `cross-encoder/ms-marco-MiniLM-L-6-v2`,
+`BAYMAX_GEN_TEMP=0.4`, `BAYMAX_GEN_TOP_K=10`, `BAYMAX_GEN_TOP_P=0.9`,
+`BAYMAX_GEN_STYLE=abstractive`, `BAYMAX_ENABLE_XAI=1`, GPU flags
+(`LLAMA_CUBLAS=1`, `CUDA_VISIBLE_DEVICES=0`, `BAYMAX_FAISS_GPU=1`), UI port 8504.
+The script also prepends the CUDA 12.6 `bin` to `PATH` for cuBLAS DLLs.
+
+---
+
+## 8. Dependencies & footprint
+
+- `requirements.txt` — runtime (app + retrieval + inference), including the
+  computer-vision deps (`torchxrayvision`, `scikit-image`, `pydicom`, `pillow`).
+  `altair` is an optional extra that enables the UI progress charts (lazy-imported).
+- `requirements-train.txt` — training-only deps (`peft`, `trl`, `datasets`,
+  `accelerate`, `bitsandbytes`) for `scripts/train_sft.py` and
+  `scripts/merge_lora.py`. Not needed to run the app.
+
+Approximate on-disk footprint (Ollama-only): **~5.9 GB total** — `.venv` ~5.5 GB
+(mostly CUDA torch), `data/` ~0.4 GB (index 175 MB + chunks 197 MB + contextual
+BM25 ~42 MB). The bundled GGUF model + `llama-cpp-python`/`gpt4all` +
+`third_party/llama.cpp` were removed (~5.7 GB) in favor of Ollama. `data/`,
+`datasets/`, `.venv/` are gitignored.
+
+---
+
+## 9. Running it
+
+```bat
+:: Windows (preferred) — launches the web app, then open http://127.0.0.1:8504
+start_system.bat
 ```
 
-**Retrieval & Embeddings**
-```bash
-BAYMAX_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
-BAYMAX_RAG_K=5                     # Top-K retrieval
-BAYMAX_RAG_MIN_SCORE=0.3           # Minimum similarity score
-BAYMAX_RAG_STRICT=1                # Strict RAG mode (context-only)
-BAYMAX_CONTEXT_CHARS=400           # Max chars per context chunk
+```powershell
+# Or run the server directly
+.venv\Scripts\python.exe -m uvicorn backend.api:app --host 127.0.0.1 --port 8504
 ```
 
-**Reranking (Optional)**
-```bash
-BAYMAX_RERANKER=none               # Cross-encoder model (none to disable)
-BAYMAX_RERANK_TOPN=25              # Pre-retrieval size
-BAYMAX_RERANK_BATCH=32             # Rerank batch size
-BAYMAX_RERANK_SKIP_THRESHOLD=0.86  # Skip rerank if high initial score
+Quick checks:
+
+```powershell
+.venv\Scripts\python.exe backend\services\retriever.py   # retriever self-test
+.venv\Scripts\python.exe scripts\check_vision.py         # image analyzer smoke
+.venv\Scripts\python.exe scripts\check_moe.py            # MoE routing smoke
+.venv\Scripts\python.exe scripts\shrink_faiss_index.py   # SQ8 index (dry run)
 ```
 
-**Performance Tuning**
-```bash
-BAYMAX_FAST_MODE=true              # Enable speed optimizations
-BAYMAX_POST_ABSTRACT=0             # Enable paraphrase post-pass
-BAYMAX_GENERATE_ALL=1              # Force generation for all inputs
-BAYMAX_NO_FALLBACKS=1              # Disable fallback responses
-BAYMAX_ENABLE_XAI=0                # Enable explainability (adds latency)
+In the chat, attach a medical image with the "+" button; each reply shows the
+consulted experts (MoE) and, for images, the findings bars. Ask "show sources"
+for a short source list.
+
+---
+
+## 10. File map
+
 ```
-
-**GPU Acceleration (Optional)**
-```bash
-LLAMA_CUBLAS=1                     # Enable CUDA for llama.cpp
-CUDA_VISIBLE_DEVICES=0
-BAYMAX_CUDA_DEVICE=0
-BAYMAX_FAISS_GPU=1                 # FAISS GPU offload
-```
-
-**Caching**
-```bash
-BAYMAX_EMBED_CACHE=256             # Query embedding cache size
-BAYMAX_NER_CACHE=64                # NER result cache size
-```
-
-**Streamlit**
-```bash
-BAYMAX_PORT=8504                   # UI port
-STREAMLIT_SERVER_ENABLECORS=false
-STREAMLIT_SERVER_ENABLEXSRFPROTECTION=false
-STREAMLIT_BROWSER_GATHERERUSAGESTATS=false
-```
-
-### Configuration File (`backend/services/config.py`)
-```python
-# Retrieval defaults
-RAG_DEFAULT_K = 5
-RAG_MIN_SCORE = 0.3
-
-# Generation defaults
-GEN_MAX_TOKENS = 320
-GEN_TEMP = 0.25
-GEN_TOP_K = 40
-GEN_TOP_P = 0.9
-GEN_SHORT_TOKENS = 80
-
-# Behavior flags
-RAG_STRICT = False  # Strict context-only mode
+healix_main_prompt.txt              single prompt template (edit me)
+start_system.bat                    Windows launcher (env vars, GPU, runs web app)
+backend/api.py                      FastAPI app: SSE chat, conversations, /api/info
+backend/conversation_store.py       persistent conversation history (JSON per chat)
+frontend/web/                       custom chat UI (index.html, styles.css, app.js)
+RESEARCH.md                         agentic MoE architecture + evaluation plan
+scripts/shrink_faiss_index.py       SQ8 index shrink/rebuild (reconstruct-based)
+scripts/build_faiss.py              full index build (needs data/chunks/*.jsonl)
+scripts/check_vision.py             image analyzer smoke test
+scripts/check_moe.py                MoE routing smoke test
+scripts/check_hybrid.py             build BM25 + dense-vs-hybrid comparison
+scripts/contextualize_and_reembed.py  full Contextual Retrieval (LLM ctx + re-embed)
+scripts/train_sft.py, merge_lora.py LoRA/SFT training (see requirements-train.txt)
+backend/services/advanced_orchestrator.py  prompt composition, summarization, XAI
+backend/services/moe_router.py      agentic Mixture-of-Experts router
+backend/services/hybrid_retriever.py  sparse BM25 + Reciprocal Rank Fusion
+backend/services/retriever.py       dense FAISS + hybrid_retrieve + rerank
+backend/services/hyde.py            two-altitude HyDE hypotheticals (runtime)
+backend/services/raptor.py          RAPTOR overview-tree search (runtime)
+scripts/build_raptor.py             RAPTOR tree build (k-means + Ollama, resumable)
+backend/services/vision.py          multi-modality imaging (chest X-ray + skin)
+backend/services/*.py               safety, audit, medication, xai, symptom NER
+data/index.faiss                    SQ8 FAISS index (~175 MB)
+data/indexed_chunks.pkl             chunk text (~197 MB)
+data/conversations/                 saved chats (gitignored)
+artifacts/*.gguf                    LLM weights (4.4 GB)
+third_party/llama.cpp               inference backend
+requirements.txt / requirements-train.txt  runtime / training deps
+WARP.md                             Warp terminal project notes
 ```
 
 ---
 
-## 🎨 USER INTERFACES
+## 11. Known trade-offs & roadmap
 
-### 1. Minimal Chat UI (app_simple.py) - ACTIVE
+**Trade-offs (intentional):** no emergency instructions; no legal disclaimers;
+dosing only on explicit request; references hidden unless asked; personalization
+is lightweight (optional CSV logging), not model-driven.
 
-**Design Philosophy:**
-- ChatGPT-like minimal interface
-- Focus on conversation, not complexity
-- Fast, responsive, streaming UX
+**Index:** SQ8 gives ~4x size reduction at ~99% recall. Going smaller (product
+quantization, ~20-30 MB) is possible but would shift the absolute similarity
+scores the retriever filters on, so it needs threshold re-tuning + recall
+validation first.
 
-**Features:**
-- Single chat surface
-- Streaming token generation with spinner
-- Emergency detection with red alert banner
-- Medication intent → DRAFT output (decision support)
-- General/symptom/reasoning → streaming responses
-- Short-query fast-path (skip retrieval for ≤16 chars)
-- Audit logging for all interactions
-- No avatars, minimal UI chrome
-
-**URL:** `http://localhost:8504` (default)
-
-**Launch Command:**
-```bash
-.\start_system.bat
-```
-
-### 2. CLI Demo (demo_chat.py)
-
-**Features:**
-- Interactive mode: type your own questions
-- Batch mode: run predefined sample queries
-- Patient/clinician mode switching
-- Session history and statistics
-- Health checks for all services
-- Example queries library
-
-**Launch Command:**
-```bash
-.venv\Scripts\python.exe demo_chat.py
-```
-
-**Commands:**
-- `quit`, `exit`, `q` - End session
-- `mode patient` / `mode clinician` - Switch modes
-- `history` - Show session statistics
-- `examples` - Display sample queries
+**Roadmap candidates:** richer baseline-capture UI with per-user persistence;
+optional structured "clinician mode"; complete RxNorm/DailyMed integration; real
+(non-stub) drug-interaction/allergy checks; multi-turn memory; quantitative
+validation of psychophysiology inference.
 
 ---
 
-## 🛡️ SAFETY & CLINICAL FEATURES
-
-### Emergency Detection System
-
-**Detection Logic:**
-1. **Keyword Matching:** 8 emergency categories with 100+ keywords
-2. **Negation Handling:** 10-character window for "no", "not", "denies"
-3. **Severity Scoring:** Weighted by keyword criticality
-4. **Level Classification:** CRITICAL | HIGH | MODERATE | LOW
-
-**Emergency Categories:**
-- **Cardiac:** 14 keywords (chest pain, heart attack, etc.)
-- **Respiratory:** 15 keywords (breathing difficulty, choking, etc.)
-- **Neurological:** 16 keywords (stroke, seizure, confusion, etc.)
-- **Trauma:** 16 keywords (bleeding, injuries, head trauma, etc.)
-- **Allergic:** 13 keywords (anaphylaxis, swelling, etc.)
-- **Mental Health:** 11 keywords (suicide, self-harm, etc.)
-- **Metabolic:** 7 keywords (diabetic coma, ketoacidosis, etc.)
-- **Obstetric:** 7 keywords (pregnancy complications, etc.)
-
-**Response Actions:**
-- **CRITICAL:** "CALL 911 IMMEDIATELY" message
-- **HIGH:** "Go to nearest emergency department"
-- **MODERATE:** "Seek medical evaluation within hours"
-- **LOW:** No emergency alert
-
-### Medication Safety (Decision Support)
-
-**Intent Routing:**
-- Medication queries → route to `medication` intent
-- Generates DRAFT candidates (NOT prescriptions)
-- Shows drug name + reason + safety checks
-- UI displays "DRAFT — Decision Support Only" banner
-
-**Safety Check Stubs:**
-- Allergy checking (placeholder)
-- Drug interaction detection (placeholder)
-- Contraindication checking (placeholder)
-- Formulary validation (placeholder)
-- **Note:** Ready for integration with real clinical systems
-
-### Audit & Compliance
-
-**Audit Log (`logs/audit_log.jsonl`):**
-```json
-{
-  "event": "chat_answer",
-  "ts": 1730555687.123,
-  "intent": "general",
-  "retrieval_s": 0.234,
-  "generation_s": 2.567,
-  "total_s": 2.801
-}
-```
-
-**Safety Log (`logs/audit_YYYYMMDD.log`):**
-```
-2025-11-02 12:34:56 - INFO - INTERACTION: {"interaction_id": "a1b2c3d4e5f6", ...}
-```
-
-**Logged Events:**
-- `chat_answer` - General/symptom/reasoning responses
-- `chat_draft` - Medication decision support drafts
-- `emergency_detected` - Critical condition alerts
-
----
-
-## ⚡ PERFORMANCE OPTIMIZATION
-
-### Current Performance
-
-**Latency Breakdown (typical query):**
-- Retrieval: ~0.1-0.5s (FAISS k=5)
-- Symptom Extraction: ~0.2-0.4s (if triggered)
-- LLM Generation: ~2-8s (320 tokens @ CPU-only)
-- **Total:** ~3-8s end-to-end
-
-**Bottleneck:** CPU-only inference (missing GPU DLLs for CUDA acceleration)
-
-### Optimization Strategies
-
-**1. Short-Query Fast-Path**
-- Skip retrieval for ≤16 char queries without medical keywords
-- Reduce token limit to 80 (vs. 320)
-- ~50% latency reduction for greetings/short inputs
-
-**2. Dynamic Token Limits**
-- Short queries: 80 tokens
-- Medium queries: 240 tokens (75% of max)
-- Long queries: 320 tokens (full)
-
-**3. Fast Mode Tuning**
-- `BAYMAX_FAST_MODE=true` (default)
-- Reduced retrieval depth (k=1 in prompt)
-- Lower temperature (0.2) for extractive style
-- Disabled reranker and post-abstractive pass
-
-**4. Caching**
-- Query embedding cache (256 entries, LRU)
-- NER result cache (64 entries, LRU)
-- Streamlit resource caching for services
-
-**5. Memory Optimization**
-- FAISS memory-mapped index (IO_FLAG_MMAP)
-- Singleton pattern for LLM/retriever/extractor
-- Lazy loading of optional components
-
-**6. Disabled Features (for speed)**
-- Reranker: `BAYMAX_RERANKER=none`
-- XAI explainability: `BAYMAX_ENABLE_XAI=0`
-- Post-abstractive pass: `BAYMAX_POST_ABSTRACT=0`
-
-### GPU Acceleration (Partial Support)
-
-**FAISS GPU:**
-- Set `BAYMAX_FAISS_GPU=1` + `BAYMAX_CUDA_DEVICE=0`
-- Requires `faiss-gpu` package + CUDA toolkit
-
-**LLM GPU (llama.cpp):**
-- Set `LLAMA_CUBLAS=1`
-- **Issue:** Missing CUDA DLLs (cublas64_XX.dll, etc.)
-- **Workaround:** CPU-only inference (slower but functional)
-
----
-
-## 🚀 DEPLOYMENT & OPERATIONS
-
-### System Requirements
-
-**Minimum:**
-- OS: Windows 10/11, Linux, macOS
-- CPU: 4 cores, 2.0+ GHz
-- RAM: 8 GB
-- Storage: 10 GB free space
-- Python: 3.9+
-
-**Recommended:**
-- CPU: 8+ cores, 3.0+ GHz
-- RAM: 16 GB
-- Storage: 20 GB SSD
-- GPU: NVIDIA with CUDA support (optional but recommended)
-
-### Installation
-
-**1. Clone Repository**
-```bash
-git clone <repo-url> baymax.v1
-cd baymax.v1
-```
-
-**2. Create Virtual Environment**
-```bash
-python -m venv .venv
-.venv\Scripts\activate.bat   # Windows
-source .venv/bin/activate    # Linux/Mac
-```
-
-**3. Install Dependencies**
-```bash
-pip install -r requirements.txt
-```
-
-**Key Packages:**
-- gpt4all
-- faiss-cpu (or faiss-gpu)
-- sentence-transformers
-- transformers
-- streamlit
-- numpy, pandas
-
-**4. Download Model**
-- Place `mistral-7b-instruct-v0.2.Q4_K_M.gguf` in `artifacts/`
-- Source: GPT4All model repository or Hugging Face
-
-**5. Build FAISS Index (if needed)**
-```bash
-python scripts/build_faiss.py
-```
-
-### Startup
-
-**Launch Streamlit UI:**
-```bash
-.\start_system.bat
-```
-
-**Launch CLI Demo:**
-```bash
-python demo_chat.py
-```
-
-**Smoke Test:**
-```bash
-python scripts\e2e_smoke.py
-```
-
-### Health Checks
-
-**Retriever Health:**
-```python
-from backend.services.retriever import MedicalRetriever
-retriever = MedicalRetriever(index_dir="data")
-health = retriever.health_check()
-print(health)  # {"status": "healthy", "chunks_loaded": 239644, ...}
-```
-
-**Orchestrator Health:**
-```python
-from backend.services.advanced_orchestrator import AdvancedMedicalOrchestrator
-orch = AdvancedMedicalOrchestrator()
-health = orch.health_check()
-print(health)  # {"status": "healthy", "model_name": "mistral-7b-...", ...}
-```
-
-### Monitoring
-
-**Logs:**
-- Audit logs: `logs/audit_log.jsonl`
-- Safety logs: `logs/audit_YYYYMMDD.log`
-
-**Metrics to Track:**
-- Average response time
-- Emergency detection rate
-- Retrieval similarity scores
-- Session duration
-- Error rates
-
-### Troubleshooting
-
-**Issue: Model not found**
-- Check `BAYMAX_GGUF_MODEL_NAME` and `BAYMAX_GGUF_MODEL_DIR`
-- Verify file exists in `artifacts/`
-
-**Issue: FAISS index missing**
-- Run `python scripts/build_faiss.py`
-- Ensure `data/index.faiss` exists
-
-**Issue: Slow responses**
-- Enable fast mode: `BAYMAX_FAST_MODE=true`
-- Reduce tokens: `BAYMAX_GEN_TOKENS=240`
-- Disable XAI: `BAYMAX_ENABLE_XAI=0`
-
-**Issue: GPU not detected**
-- Install CUDA toolkit + DLLs
-- Set `LLAMA_CUBLAS=1` and `CUDA_VISIBLE_DEVICES=0`
-
----
-
-## 📜 DEVELOPMENT HISTORY
-
-### Phase 1: Foundation (Oct 2025)
-- ✅ Local dev environment setup
-- ✅ MedQuAD dataset integration (28,310 docs)
-- ✅ FAISS vector index
-- ✅ GPT4All LLM integration (Mistral-7B)
-- ✅ Clinical symptom extraction (NER)
-- ✅ Retrieval service with provenance
-- ✅ Streamlit UI
-- ✅ Safety system (emergency detection, audit logging)
-
-### Phase 2: ChatGPT-Level Upgrade (Oct-Nov 2025)
-- ✅ Advanced orchestrator with Mistral-7B-Instruct
-- ✅ Multi-dataset integration (MedQuAD + PubMedQA + drugs)
-- ✅ FAISS index expansion (28K → 239K documents)
-- ✅ Intent routing (medication | symptom | reasoning | general)
-- ✅ Emergency severity scoring (8 categories)
-- ✅ Streaming token generation
-- ✅ Minimal ChatGPT-like UI (app_simple.py)
-- ✅ Performance optimization (fast mode, caching, dynamic tokens)
-- ✅ Audit logging integration
-- ✅ Clinical safety check stubs
-
-### Recent Changes (Nov 2025)
-- ✅ Unified intent routing in orchestrator
-- ✅ Medication decision support (DRAFT output)
-- ✅ Short-query fast-path (skip retrieval for greetings)
-- ✅ Disabled fallbacks (BAYMAX_NO_FALLBACKS=1)
-- ✅ Disabled post-abstractive pass (for speed)
-- ✅ Streaming UI with spinner
-- ✅ Audit logging for all chat flows
-- ✅ Environment variable tuning (tokens, threads, style)
-
----
-
-## ⚠️ KNOWN LIMITATIONS
-
-### Technical Limitations
-
-1. **CPU-Only Inference**
-   - Missing GPU DLLs for CUDA acceleration
-   - Bottleneck: 2-8s generation time
-   - Solution: Install CUDA toolkit + DLLs
-
-2. **Context Window**
-   - Max 4096 tokens (Mistral-7B limit)
-   - Long documents truncated to fit
-   - Solution: Hybrid retrieval + summarization
-
-3. **No Real-Time Drug Database**
-   - Medication safety checks are stubs
-   - No integration with pharmacy systems
-   - Solution: Connect to DailyMed/RxNorm APIs
-
-4. **Limited Multi-Turn Memory**
-   - No persistent conversation history
-   - Each query treated independently
-   - Solution: Add conversation state management
-
-5. **No Image/PDF Processing**
-   - Text-only input and output
-   - Cannot interpret lab reports, X-rays, etc.
-   - Solution: Add OCR + vision models
-
-### Clinical Limitations
-
-1. **Not a Medical Device**
-   - Educational and informational use only
-   - Not FDA-approved for clinical use
-   - Always requires professional medical review
-
-2. **No Diagnostic Authority**
-   - Suggestions, not diagnoses
-   - Cannot replace physician judgment
-   - Emergency detection is best-effort, not guaranteed
-
-3. **Limited Specialty Depth**
-   - Generalist knowledge, not specialist-level
-   - May lack rare disease expertise
-   - Solution: Add specialty-specific indices
-
-4. **No Patient History Integration**
-   - No EHR/EMR access
-   - Cannot personalize based on patient records
-   - Solution: HL7/FHIR integration
-
-### Data Limitations
-
-1. **Incomplete Coverage**
-   - RxNorm partially integrated
-   - DailyMed not yet integrated
-   - Clinical guidelines limited
-   - Solution: Continue dataset expansion
-
-2. **Data Freshness**
-   - Snapshot from Oct 2025
-   - No real-time updates
-   - Solution: Periodic re-indexing pipeline
-
-3. **Licensing Constraints**
-   - RxNorm requires NIH UMLS license
-   - Some datasets restricted to research use
-   - Solution: Obtain necessary licenses
-
----
-
-## 🔮 FUTURE ROADMAP
-
-### High Priority (Q1 2026)
-
-1. **GPU Acceleration**
-   - Install CUDA toolkit + DLLs
-   - Enable llama.cpp CUDA backend
-   - Target: <1s generation time
-
-2. **Complete RxNorm Integration**
-   - Full drug vocabulary mapping
-   - Semantic drug search
-   - Drug interaction detection
-
-3. **DailyMed SPL Integration**
-   - Official FDA drug labels
-   - Dosing guidelines
-   - Black box warnings
-
-4. **Clinical Guidelines**
-   - WHO, CDC, NICE protocols
-   - Evidence-based treatment pathways
-   - Specialty-specific guidelines
-
-### Medium Priority (Q2 2026)
-
-5. **Multi-Turn Conversation**
-   - Persistent conversation state
-   - Follow-up question generation
-   - Context-aware clarifications
-
-6. **Differential Diagnosis Engine**
-   - Bayesian reasoning
-   - Clinical decision support
-   - Probability scoring
-
-7. **Real-Time Safety Checks**
-   - Allergy database integration
-   - Drug interaction API
-   - Contraindication checking
-   - Formulary validation
-
-8. **Advanced RAG Techniques**
-   - Query expansion
-   - Hybrid retrieval (dense + sparse)
-   - Multi-index fusion
-   - Re-ranking with cross-encoders
-
-### Long-Term Vision (2026+)
-
-9. **EHR/EMR Integration**
-   - HL7/FHIR interfaces
-   - Patient history access
-   - Personalized recommendations
-
-10. **Multimodal Support**
-    - Lab report OCR
-    - Medical image interpretation
-    - Voice input/output
-    - PDF document parsing
-
-11. **Telemedicine Features**
-    - Video consultation support
-    - Remote monitoring integration
-    - Prescription management
-
-12. **Clinical Validation**
-    - Medical expert review
-    - Clinical trial integration
-    - FDA clearance path (if applicable)
-
-13. **Deployment Options**
-    - Docker containerization
-    - Cloud deployment (AWS/Azure/GCP)
-    - On-premises enterprise packages
-    - Mobile app (iOS/Android)
-
----
-
-## 📞 SUPPORT & RESOURCES
-
-### Documentation
-- `CHECKPOINT.md` - Project status and recent work
-- `PROJECT_KNOWLEDGE.md` - This comprehensive guide (you are here)
-- `README.md` - Quick start guide (if exists)
-
-### Key Scripts
-- `start_system.bat` - Launch Streamlit UI
-- `demo_chat.py` - CLI demo interface
-- `scripts/e2e_smoke.py` - End-to-end smoke test
-- `scripts/build_faiss.py` - Rebuild FAISS index
-
-### Contact & Contribution
-- Project Owner: [Your Name/Team]
-- Repository: [GitHub/GitLab URL]
-- Issues: [Issue Tracker URL]
-- Discussions: [Community Forum/Discord/Slack]
-
-### Disclaimers
-
-**Medical Disclaimer:**
-This AI system is for informational and educational purposes only. It is not a substitute for professional medical advice, diagnosis, or treatment. Always seek the advice of your physician or other qualified health provider with any questions you may have regarding a medical condition. Never disregard professional medical advice or delay in seeking it because of something you have read from this AI system.
-
-**Emergency Disclaimer:**
-In case of a medical emergency, call your local emergency number (e.g., 911 in the US) immediately. This AI system's emergency detection is best-effort and may not catch all critical conditions. Do not rely solely on this system for emergency triage.
-
-**Privacy Notice:**
-All processing is performed locally on your machine. No data is sent to external servers. However, logs may contain sensitive health information and should be handled according to applicable privacy regulations (HIPAA, GDPR, etc.).
-
----
-
-## 📈 PROJECT METRICS
-
-### Code Statistics (as of Nov 2025)
-- **Total Python Files:** ~30
-- **Core Services:** 10 files (~3,500 lines)
-- **Frontend:** 2 files (~500 lines)
-- **Scripts:** ~15 files (~2,000 lines)
-- **Test Files:** ~8 files (~1,000 lines)
-
-### Knowledge Base Statistics
-- **Total Documents:** 239,644 chunks
-- **Total Size:** ~1.1 GB (index + chunks + metadata)
-- **Embedding Dimension:** 768
-- **Average Chunk Size:** ~300 words
-
-### Model Statistics
-- **Model Size:** 4.4 GB (Q4_K_M quantization)
-- **Parameters:** ~7 billion (Mistral-7B)
-- **Context Window:** 4096 tokens
-- **Quantization:** 4-bit (Q4_K_M)
-
-### Performance Benchmarks (CPU-only, 12 threads)
-- **Model Load Time:** ~3-5s
-- **Index Load Time:** ~2-4s
-- **Query Encoding:** ~0.05-0.1s
-- **FAISS Search (k=5):** ~0.1-0.3s
-- **NER Extraction:** ~0.2-0.4s
-- **LLM Generation (320 tokens):** ~2-8s
-- **End-to-End:** ~3-10s
-
----
-
-## 🏁 CONCLUSION
-
-Healix (Baymax.v1) is a production-ready, local-first medical AI system with ChatGPT-level conversational capabilities and comprehensive safety features. The system successfully combines advanced LLM reasoning (Mistral-7B), semantic retrieval (FAISS + 239K docs), and clinical NER for a complete healthcare information assistant.
-
-**Current State:**
-- ✅ Fully operational with minimal ChatGPT-style UI
-- ✅ Streaming responses for responsive UX
-- ✅ Emergency detection and safety checks
-- ✅ Audit logging and compliance readiness
-- ✅ Optimized for fast CPU-only inference
-
-**Next Steps:**
-- 🔄 Enable GPU acceleration (install CUDA DLLs)
-- 🔄 Complete RxNorm + DailyMed integration
-- 🔄 Add clinical guidelines datasets
-- 🔄 Enhance multi-turn conversation memory
-
-The system is ready for deployment in educational, research, and pilot clinical decision support settings, with clear disclaimers and safety guardrails in place.
-
----
-
-**Last Updated:** November 2, 2025  
-**Project Version:** 1.0-RC (Release Candidate)  
-**Status:** Operational & Production-Ready
+## 12. Recent maintenance (June 2026 cleanup)
+
+- Cleared the user pip wheel cache (~10.3 GB, outside the repo).
+- Uninstalled unused/training-only venv packages: `gradio` + `gradio_client`
+  (UI is Streamlit), `bitsandbytes`, `spacy` (~470 MB).
+- Shrank the FAISS index 736 MB -> 175 MB (IndexFlatIP -> SQ8) and removed the
+  redundant `faiss_metadata.pkl` (~125 MB); retriever made metadata-optional.
+- Aligned `.env` with `start_system.bat` (reranker on, `RAG_STRICT=0`) and
+  documented launch precedence.
+- Split `requirements.txt` into runtime + `requirements-train.txt`; fixed a
+  duplicate import; consolidated four overlapping docs into this file + README.
+
+**Feature work (same round):**
+- Added local medical computer vision (`backend/services/vision.py`) — chest
+  X-ray analysis via TorchXRayVision, with findings injected into the LLM prompt
+  (`prepare_stream_prompt(image_findings=...)`).
+- Rebuilt the Streamlit UI as a ChatGPT/Claude-style chat: empty-state greeting,
+  clean message bubbles, and a single composer with an inline "+" attach button
+  for images (native `st.chat_input(accept_file=...)`). No emojis, no disclaimer
+  clutter. Attached chest X-rays show as a thumbnail; findings render as
+  probability bars in the reply.
+- Replaced the empty/alarming emergency banner with the calm LLM path (detection
+  retained for the audit log only), aligning the UI with the no-emergency-directive
+  design.
+
+**Web rebuild + research (later in the round):**
+- Replaced Streamlit with a custom web app: `backend/api.py` (FastAPI, SSE
+  streaming) serving a hand-built chat UI in `frontend/web/`.
+- Added persistent multi-conversation history (`backend/conversation_store.py`),
+  fixing the "forgets past chats" problem, and widened the per-turn memory window
+  (`BAYMAX_MEMORY_TURNS=10`, `BAYMAX_MEMORY_CHARS=2400`).
+- Added an agentic Mixture-of-Experts router (`backend/services/moe_router.py`,
+  section 4b, `RESEARCH.md`); routing chips shown per reply.
+- Extended vision to multi-modality (chest X-ray + skin lesion, auto-routed).
+- Pointed `start_system.bat` at uvicorn; the Streamlit app and `.streamlit/`
+  theme are superseded (`frontend/app_professional.py` left in place but unused).
+
+**Hybrid RAG + brand refresh (later in the round):**
+- Added hybrid retrieval — dense FAISS + sparse BM25 fused with Reciprocal Rank
+  Fusion, reranked (`backend/services/hybrid_retriever.py`); wired into the MoE
+  experts and the fallback path (`HEALIX_HYBRID=1`). RESEARCH.md §8.
+- New logo (hexagonal node + vitals pulse) + `favicon.svg`; UI polish
+  (depth gradient, refined empty state).
+
+**Ollama brain + black/white UI + contextual RAG (later in the round):**
+- Added a pluggable **Ollama** generation backend (`BAYMAX_LLM_BACKEND=ollama`,
+  `BAYMAX_OLLAMA_MODEL=llama3:latest`) that streams from the local Ollama server
+  and skips the GGUF load; falls back to the local model if unreachable.
+- Redesigned the UI to a **monochrome black-and-white** theme (no glow, Claude-
+  grade), monochrome logo/favicon, and a looping "thinking" logo animation while
+  the model generates.
+- Added **Contextual Retrieval** (lexical half) — context-enriched BM25
+  (`HEALIX_CONTEXTUAL=1`).
+
+**Generation-quality upgrade (July 2026):**
+- Rewrote `healix_main_prompt.txt` for the 7B Ollama model and validated it live
+  (3 runs per scenario against the real model): evidence-noise handling,
+  accuracy rule, one consolidated question quota, anti-boilerplate bans,
+  length targets. Lesson: never put quotable example sentences in rules —
+  the model parrots them verbatim.
+- Split the prompt into system vs user via a `<<<USER TURN>>>` marker
+  (`PROMPT_SPLIT_MARKER` in the orchestrator); Ollama now gets the rules as a
+  true system message. Conversation memory lives in the system half with
+  historical labels ("You already replied:") because a `User:/Healix:`
+  transcript in the user turn made the model re-state its last reply.
+- Fixed two silent bugs: the SSE chat path hardcoded `temp=0.15` (now reads
+  `BAYMAX_GEN_TEMP`, set to 0.4), and the Ollama payload never pinned
+  `num_ctx`, so prompts longer than the 4096 default were truncated from the
+  top — chopping the rules first. Now pinned from `BAYMAX_GEN_CONTEXT` (8192).
+- Follow-up-aware retrieval: short messages (<8 words) fold the previous user
+  message into the search query so "what about at night?" retrieves on-topic.
+- Deterministic post-processing: an opening paragraph that near-duplicates the
+  previous reply is stripped (`_strip_opening_echo` in `api.py`), and stray
+  exclamation marks are normalized away in `clean_stream_text`.
+- Evidence snippets now cut at sentence boundaries and dedupe; Ollama
+  `keep_alive=30m` avoids model reload lag between turns.
+
+**Altitude-matched retrieval: RAPTOR × HyDE (July 2026):**
+- Implemented roadmap item HyDE and merged it with a RAPTOR summary tree in a
+  novel coupling: hypotheticals generated at two abstraction levels, each
+  searching the matching index tier (section 4c, RESEARCH.md §9).
+- New: `backend/services/hyde.py`, `backend/services/raptor.py`,
+  `scripts/build_raptor.py`; wiring in `backend/api.py`; flags `HEALIX_HYDE`,
+  `HEALIX_RAPTOR` in both launchers. Everything fail-open.

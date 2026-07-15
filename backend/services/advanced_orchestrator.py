@@ -9,7 +9,10 @@ import re
 import numpy as np
 from typing import List, Dict, Optional, Any, Tuple
 from pathlib import Path
-import gpt4all
+try:
+    import gpt4all  # optional; only used for the local GGUF fallback backend
+except Exception:
+    gpt4all = None
 # Load .env for direct Python runs (optional)
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -27,6 +30,11 @@ import os
 import threading
 from .xai import build_xai_package
 from .config import GEN_MAX_TOKENS, GEN_TEMP, GEN_TOP_K, GEN_TOP_P, GEN_SHORT_TOKENS
+
+# Optional divider inside the composed prompt: text above it is sent to the
+# LLM as the system message (stronger instruction adherence), text below as
+# the user turn. Backends that have no system slot just remove the line.
+PROMPT_SPLIT_MARKER = "<<<USER TURN>>>"
 from .retriever import create_retriever
 from .symptom_extractor import create_symptom_extractor
 
@@ -105,6 +113,11 @@ class AdvancedMedicalOrchestrator:
         self.model = None
         self.backend = "gpt4all"  # or "llama_cpp"
         self._llama = None
+        # Optional Ollama backend: when BAYMAX_LLM_BACKEND=ollama we call the local
+        # Ollama server and skip loading the GGUF entirely (faster, stronger models).
+        self.llm_backend = (os.getenv("BAYMAX_LLM_BACKEND", "") or "").strip().lower()
+        self.ollama_url = os.getenv("BAYMAX_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+        self.ollama_model = os.getenv("BAYMAX_OLLAMA_MODEL", "llama3:latest")
         self.enable_advanced_reasoning = enable_advanced_reasoning
         # Allow env to disable XAI for latency: BAYMAX_ENABLE_XAI=0/false
         env_xai = os.getenv("BAYMAX_ENABLE_XAI")
@@ -133,7 +146,9 @@ class AdvancedMedicalOrchestrator:
         print(f"Advanced Medical Orchestrator initialized with {self.model_name}")
         
     def _ensure_model_loaded(self):
-        """Load the GPT4All model lazily on first use."""
+        """Load the local model lazily on first use (skipped for the Ollama backend)."""
+        if self.llm_backend == "ollama":
+            return  # Ollama runs as a server; nothing to load locally
         if self.model is None:
             self._initialize_advanced_model()
     
@@ -264,7 +279,10 @@ class AdvancedMedicalOrchestrator:
         """Minimal default directive used only if no external main prompt template is provided.
         Keep this short to avoid multiple embedded prompts in code.
         """
-        return "You are Healix — speak calmly and clearly about health."
+        return ("You are Healix, a calm medical companion. Answer only health questions. "
+                "Begin directly with the answer — never introduce yourself or greet. "
+                "Use clear markdown: short paragraphs, and numbered lists with bold lead-ins "
+                "for plans or multi-part guidance. No exclamation marks, no emojis, no disclaimers.")
     
     def _detect_advanced_emergency(self, text: str) -> Dict[str, Any]:
         """Advanced emergency detection with severity assessment"""
@@ -513,6 +531,10 @@ class AdvancedMedicalOrchestrator:
         # Identity response rule (minimal one-liner)
         if self._is_identity_query(user_text):
             return self._build_identity_response()
+
+        # Domain rule: politely decline clearly non-medical queries.
+        if not self._is_healthcare_topic(user_text):
+            return self._build_non_medical_refusal_response(user_text)
 
         specialties = self._identify_medical_specialty(user_text)
         query_type = self._classify_query_type(user_text, symptom_data)
@@ -1042,7 +1064,10 @@ Ref[{i}]: {source} ({category}): {snippet}...
                 continue
             if len(text) > per_turn_limit:
                 text = text[:per_turn_limit].rstrip() + "..."
-            role_label = "User" if role == "user" else "Healix"
+            # Historical framing ("you already told them") rather than a
+            # transcript ("User:/Healix:") — small models continue transcripts
+            # by re-stating the last assistant line as their opening.
+            role_label = "The user said" if role == "user" else "You already replied"
             lines.append(f"{role_label}: {text}")
         memory = "\n".join(lines[-max_turns:]).strip()
         if len(memory) > char_limit:
@@ -1075,7 +1100,18 @@ Ref[{i}]: {source} ({category}): {snippet}...
             t = os.getenv(env_key)
             if t and isinstance(t, str) and len(t.strip()) > 0:
                 return t
-        # 3) Minimal synthesized default to avoid embedding long prompts here
+        # 3) Project-root healix_main_prompt.txt, so bare `uvicorn`/`python`
+        #    runs get the real prompt even when no launcher set the env var
+        try:
+            default_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "healix_main_prompt.txt")
+            if os.path.exists(default_path):
+                with open(default_path, "r", encoding="utf-8") as f:
+                    return f.read()
+        except Exception:
+            pass
+        # 4) Minimal synthesized default to avoid embedding long prompts here
         directive = self._create_advanced_medical_prompt("general").strip()
         tail = (
             "\n\nCONVERSATION MEMORY:\n{CONVERSATION_MEMORY}\n\n"
@@ -1090,7 +1126,9 @@ Ref[{i}]: {source} ({category}): {snippet}...
                              passages: List[Dict],
                              symptoms: Optional[Dict],
                              summarized_context: Optional[str] = None,
-                             conversation_memory: Optional[str] = None) -> str:
+                             conversation_memory: Optional[str] = None,
+                             image_findings: Optional[str] = None,
+                             expert_directive: Optional[str] = None) -> str:
         # Evidence block
         if summarized_context:
             evidence_block = summarized_context.strip()
@@ -1100,14 +1138,33 @@ Ref[{i}]: {source} ({category}): {snippet}...
                 ctx_chars = int(os.getenv("BAYMAX_CONTEXT_CHARS", "400"))
             except Exception:
                 ctx_chars = 400
+            seen = set()
             for p in (passages or [])[:10]:
                 txt = p.get('text') or ''
                 if not isinstance(txt, str):
                     txt = str(txt)
                 snippet = txt[:ctx_chars].strip()
-                if snippet:
+                if len(txt) > ctx_chars:
+                    # Cut at the last sentence end so the model never sees a
+                    # mid-sentence fragment it might imitate or misread.
+                    cut = max(snippet.rfind('. '), snippet.rfind('? '), snippet.rfind('! '))
+                    if cut >= ctx_chars // 3:
+                        snippet = snippet[:cut + 1]
+                key = snippet.lower()
+                if snippet and key not in seen:
+                    seen.add(key)
                     lines.append(f"- {snippet}")
             evidence_block = "\n".join(lines)
+
+        # Prepend automated imaging findings (if any) so the model grounds its
+        # explanation in what the vision model perceived, without diagnosing.
+        if image_findings and image_findings.strip():
+            evidence_block = (image_findings.strip() + "\n" + evidence_block).strip()
+
+        # Prepend the activated specialist-panel directive (MoE routing), so the
+        # model integrates the consulted experts' perspectives into one answer.
+        if expert_directive and expert_directive.strip():
+            evidence_block = (expert_directive.strip() + "\n" + evidence_block).strip()
         
         # Symptom line
         symptom_line = ""
@@ -1142,6 +1199,42 @@ Ref[{i}]: {source} ({category}): {snippet}...
             return tmpl.format_map(params)
         except Exception:
             return f"{tmpl}\n\n{evidence_block}\n\n{user_text}"
+
+    def clean_stream_text(self, raw_response: str) -> str:
+        """Light cleanup for streamed replies: trim stray field headers and
+        wrapping quotes while PRESERVING markdown and line breaks.
+
+        The heavier _extract_conversational_text collapses every newline and
+        strips bold/lists — fine for the legacy JSON-style non-streaming path,
+        but it was flattening well-formatted streamed answers into a single
+        wall of text before they were rendered and persisted.
+        """
+        text = (raw_response or "").strip()
+        if not text:
+            return ""
+        # If the whole reply is a JSON object, pull the best text field.
+        if re.match(r'^\s*\{.*\}\s*$', text, flags=re.DOTALL):
+            try:
+                import json as _json
+                parsed = _json.loads(text)
+                for key in ("medical_assessment", "answer", "response", "summary"):
+                    val = parsed.get(key)
+                    if isinstance(val, str) and val.strip():
+                        text = val.strip()
+                        break
+            except Exception:
+                pass
+        # Strip a leading field header if the model emitted one.
+        text = re.sub(r'^"?(?:medical_assessment|answer|response)"?\s*:\s*"?', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^(?:Response:|Answer:|Medical Assessment:)\s*', '', text, flags=re.IGNORECASE)
+        # Normalize runs of blank lines but keep paragraph/list structure.
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+        if len(text) > 1 and text[0] == '"' and text[-1] == '"':
+            text = text[1:-1].strip()
+        # House style bans exclamation marks; the model still slips one in
+        # occasionally, so enforce it here.
+        text = re.sub(r'!+', '.', text)
+        return text
 
     def _extract_conversational_text(self, raw_response: str) -> str:
         """Extract clean conversational text from model output, removing JSON or structured formatting.
@@ -1194,8 +1287,16 @@ Ref[{i}]: {source} ({category}): {snippet}...
                               retrieved_passages: List[Dict],
                               symptom_data: Optional[Dict] = None,
                               conversation_context: Optional[List[Dict]] = None,
-                              user_mode: str = "patient") -> Tuple[str, str, List[str]]:
-        """Prepare the full prompt and metadata for streaming, using a single main prompt template."""
+                              user_mode: str = "patient",
+                              image_findings: Optional[str] = None,
+                              expert_directive: Optional[str] = None) -> Tuple[str, str, List[str]]:
+        """Prepare the full prompt and metadata for streaming, using a single main prompt template.
+
+        image_findings: optional text block of automated imaging findings (e.g.
+        from backend.services.vision) to ground the explanation.
+        expert_directive: optional MoE specialist-panel directive (from
+        backend.services.moe_router) describing the activated experts.
+        """
         safe_passages = self._convert_to_json_safe(retrieved_passages)
         safe_symptoms = self._convert_to_json_safe(symptom_data) if symptom_data else None
         specialties = self._identify_medical_specialty(user_text)
@@ -1207,6 +1308,8 @@ Ref[{i}]: {source} ({category}): {snippet}...
             symptoms=safe_symptoms,
             summarized_context=None,
             conversation_memory=conv_mem or "",
+            image_findings=image_findings,
+            expert_directive=expert_directive,
         )
         return full_prompt, query_type, specialties
 
@@ -1257,8 +1360,11 @@ Ref[{i}]: {source} ({category}): {snippet}...
         query_lower = query.lower().strip()
         query_words = query.split()
         
-        # Greetings and small talk
-        if len(query_words) <= 3 and any(g in query_lower for g in ["hi", "hello", "hey", "thanks", "thank you", "bye", "goodbye"]):
+        # Greetings and small talk (word-boundary match: "hi" must not match
+        # inside "hip pain", which used to skip retrieval for short queries)
+        if len(query_words) <= 4 and re.search(
+                r"\b(?:hi|hiya|hello|hey|yo|thanks|thank\s+you|bye|goodbye|good\s+(?:morning|afternoon|evening|night))\b",
+                query_lower):
             return "greeting"
         
         # Simple factual queries
@@ -1294,7 +1400,14 @@ Ref[{i}]: {source} ({category}): {snippet}...
                             temp: float = GEN_TEMP,
                             top_k: int = GEN_TOP_K,
                             top_p: float = GEN_TOP_P) -> str:
-        """Generate text (non-streaming) using either llama.cpp (GPU) or GPT4All."""
+        """Generate text (non-streaming) using Ollama, llama.cpp (GPU), or GPT4All."""
+        if self.llm_backend == "ollama":
+            try:
+                return self._ollama_generate(prompt, max_tokens=max_tokens, temp=temp,
+                                             top_k=top_k, top_p=top_p)
+            except Exception as e:
+                print(f"Ollama generate failed: {e}; falling back to local model")
+        prompt = prompt.replace(PROMPT_SPLIT_MARKER, "")
         self._ensure_model_loaded()
         # Try llama.cpp first if available
         if self.backend == "llama_cpp" and self._llama is not None:
@@ -1338,6 +1451,7 @@ Ref[{i}]: {source} ({category}): {snippet}...
                              top_k: int = GEN_TOP_K,
                              top_p: float = GEN_TOP_P):
         """Stream tokens using either llama.cpp (GPU) or GPT4All."""
+        prompt = prompt.replace(PROMPT_SPLIT_MARKER, "")
         self._ensure_model_loaded()
         # llama.cpp streaming
         if self.backend == "llama_cpp" and self._llama is not None:
@@ -1381,6 +1495,53 @@ Ref[{i}]: {source} ({category}): {snippet}...
         except Exception:
             pass
 
+    def _ollama_stream(self, prompt: str, max_tokens: int = GEN_MAX_TOKENS,
+                       temp: float = GEN_TEMP, top_k: int = GEN_TOP_K,
+                       top_p: float = GEN_TOP_P):
+        """Stream tokens from a local Ollama server (/api/generate)."""
+        import json as _json
+        import requests
+        system_text = ""
+        if PROMPT_SPLIT_MARKER in prompt:
+            system_text, prompt = prompt.split(PROMPT_SPLIT_MARKER, 1)
+            system_text, prompt = system_text.strip(), prompt.strip()
+        try:
+            num_ctx = int(os.getenv("BAYMAX_GEN_CONTEXT", "8192"))
+        except Exception:
+            num_ctx = 8192
+        payload = {
+            "model": self.ollama_model,
+            "prompt": prompt,
+            "stream": True,
+            "keep_alive": os.getenv("BAYMAX_OLLAMA_KEEP_ALIVE", "30m"),
+            "options": {"temperature": float(temp), "top_p": float(top_p),
+                        "top_k": int(top_k), "num_predict": int(max_tokens),
+                        "num_ctx": num_ctx},
+        }
+        if system_text:
+            payload["system"] = system_text
+        with requests.post(f"{self.ollama_url}/api/generate", json=payload,
+                           stream=True, timeout=600) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line.decode("utf-8"))
+                except Exception:
+                    continue
+                tok = obj.get("response", "")
+                if tok:
+                    yield tok
+                if obj.get("done"):
+                    break
+
+    def _ollama_generate(self, prompt: str, max_tokens: int = GEN_MAX_TOKENS,
+                         temp: float = GEN_TEMP, top_k: int = GEN_TOP_K,
+                         top_p: float = GEN_TOP_P) -> str:
+        return "".join(self._ollama_stream(prompt, max_tokens=max_tokens, temp=temp,
+                                           top_k=top_k, top_p=top_p))
+
     def stream_generate(self,
                         prompt: str,
                         max_tokens: int = GEN_MAX_TOKENS,
@@ -1388,6 +1549,20 @@ Ref[{i}]: {source} ({category}): {snippet}...
                         top_k: int = GEN_TOP_K,
                         top_p: float = GEN_TOP_P):
         """Stream tokens directly using the unified backend; fallback to buffered split."""
+        # Ollama backend: stream from the server, skip local model entirely.
+        if self.llm_backend == "ollama":
+            try:
+                produced = False
+                with self._gen_lock:
+                    for tok in self._ollama_stream(prompt, max_tokens=max_tokens,
+                                                   temp=temp, top_k=top_k, top_p=top_p):
+                        if tok:
+                            produced = True
+                            yield tok
+                if produced:
+                    return
+            except Exception as e:
+                print(f"Ollama backend failed: {e}; falling back to local model")
         # Ensure model is loaded before streaming
         self._ensure_model_loaded()
         with self._gen_lock:
