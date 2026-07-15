@@ -70,6 +70,14 @@ EXPERTS: List[Expert] = [
            "stomach nausea acid reflux bowel diarrhea constipation abdominal "
            "digestion gut",
            ("stomach", "nausea", "acid", "reflux", "bowel", "abdomen", "diarrhea")),
+    Expert("Musculoskeletal",
+           "musculoskeletal, orthopedic and mechanical-pain causes and management of: {q}",
+           "back pain neck pain joint muscle bone spine posture arthritis "
+           "sprain strain stiffness sciatica shoulder knee hip tendon ligament "
+           "mobility ergonomics",
+           ("back pain", "neck pain", "joint", "muscle", "bone", "spine",
+            "posture", "arthritis", "sprain", "sciatica", "shoulder", "knee",
+            "hip", "stiff", "lower back")),
     Expert("Pharmacology",
            "medication, dosing, side effects and interactions for: {q}",
            "medication drug dose side effect interaction contraindication "

@@ -171,7 +171,7 @@ colorful → skin/derm photo) or by an explicit `modality` argument.
 
 `backend/services/moe_router.py` adds a system-level sparse MoE over medical
 specialists (Cardiology, Pulmonology, Neurology, Dermatology, Gastroenterology,
-Pharmacology, Psychophysiology, General).
+Musculoskeletal, Pharmacology, Psychophysiology, General).
 
 - **Gate:** cosine similarity between the query embedding and per-expert prototype
   embeddings, plus keyword priors and an imaging-modality affinity, sharpened by a

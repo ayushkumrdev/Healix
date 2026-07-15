@@ -209,6 +209,34 @@ def _strip_opening_echo(text: str, prev_reply: str) -> str:
     return text
 
 
+_FILLER_CLOSER_PHRASES = (
+    "please share more detail", "please provide more detail",
+    "if you have any concern", "if you have any question",
+    "if you have any other", "feel free to", "let me know if",
+    "so i can help you understand", "so we can discuss this further",
+    "i'm here to help", "i am here to help", "happy to help",
+)
+
+
+def _strip_filler_closer(text: str) -> str:
+    """Drop a trailing formulaic invitation ("if you have any concerns, please
+    share more details...") that the small model keeps appending. Only removes
+    the final sentence, only if it is filler, and only if a substantive reply
+    remains — a genuine, specific closing question is left untouched."""
+    if not text:
+        return text
+    import re as _re
+    body = text.rstrip()
+    bounds = list(_re.finditer(r"[.!?]\s+", body))
+    start = bounds[-1].end() if bounds else 0
+    last = body[start:].lower()
+    if any(p in last for p in _FILLER_CLOSER_PHRASES):
+        kept = body[:start].rstrip()
+        if len(kept.split()) >= 8:
+            return kept
+    return text
+
+
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     retriever, orch = get_services()
@@ -337,6 +365,7 @@ def chat(req: ChatRequest):
                 (m.get("content") for m in reversed(context)
                  if m.get("role") == "assistant" and isinstance(m.get("content"), str)), "")
             cleaned = _strip_opening_echo(cleaned, prev_assistant) or cleaned
+            cleaned = _strip_filler_closer(cleaned) or cleaned
 
             sources = sorted({p.get("source", "") for p in passages if p.get("source")})
             timings = {"retrieval_s": round(t1 - t0, 2),
