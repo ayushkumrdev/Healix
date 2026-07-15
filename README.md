@@ -51,7 +51,7 @@ No cloud calls, no external APIs — all reasoning happens locally.
 ### 1. Clone
 
 ```bash
-git clone --depth 1 https://github.com/a8playzxxx/Healix.git
+git clone --depth 1 https://github.com/ayushkumrdev/Healix.git
 cd Healix
 ```
 
@@ -103,7 +103,7 @@ Healix needs two files in `data/` that are **not** in the git repo (too large):
 - `data/indexed_chunks.pkl` — the chunk text (~197 MB)
 
 **Option A — download the prebuilt index (recommended).** Grab both files from
-the project's [GitHub Releases](https://github.com/a8playzxxx/Healix/releases)
+the project's [GitHub Releases](https://github.com/ayushkumrdev/Healix/releases)
 and drop them into `data/`:
 
 ```bash
