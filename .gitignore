@@ -14,6 +14,11 @@ __pycache__/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# Environment / secrets — never commit the real .env (see .env.example)
+.env
+.env.*
+!.env.example
+
 # Virtual environments
 .venv/
 venv/
