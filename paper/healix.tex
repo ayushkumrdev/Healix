@@ -1,0 +1,402 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{url}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Altitude-Matched Retrieval and Agentic Mixture-of-Experts for a
+Local-First Medical Reasoning Companion}
+
+\author{\IEEEauthorblockN{Ayush Kumar}
+\IEEEauthorblockA{\textit{Healix Project} \\
+\textit{Independent Research}\\
+Email: preetndt@gmail.com}
+% Add co-authors / affiliation here before submission.
+}
+
+\maketitle
+
+\begin{abstract}
+Retrieval-augmented generation (RAG) has become the dominant paradigm for
+grounding large language models (LLMs) in domain knowledge, yet two structural
+gaps persist for consumer medical question answering. First, flat retrieval
+returns leaf passages that answer specific questions well but cannot serve
+\emph{broad} questions whose answer lives only in the aggregate of many
+passages. Second, single-embedding dense retrieval is brittle to the colloquial,
+under-specified phrasing typical of patients. We present \textbf{Healix}, a
+fully on-device medical reasoning companion, and its retrieval stack, which
+addresses both gaps with a single mechanism we call \emph{altitude-matched
+retrieval}: one small language model drafts a \emph{hypothetical} answer at two
+levels of abstraction, and each level is routed to the matching tier of a
+hierarchical index---a specific hypothetical searches the leaf passage index,
+while a broad hypothetical searches a RAPTOR-style summary tree. This couples
+Hypothetical Document Embeddings (HyDE) and recursive summarization in a way
+that, to our knowledge, has not been described. We further introduce an
+\emph{agentic Mixture-of-Medical-Experts} (MoME) router that performs
+system-level sparse gating over specialist retrieval lenses. The complete system
+runs offline on a single commodity GPU. On a query-variation retrieval benchmark
+derived from MedQuAD and PubMedQA, we report the effect of each stage on
+Recall@$k$ and MRR, and we quantify the latency engineering---most notably a
+$3\times$ reduction in query-side overhead---required to make the stack
+interactive. We discuss the safety posture of a disclaimer-free medical
+assistant and release the full system as open source.
+\end{abstract}
+
+\begin{IEEEkeywords}
+retrieval-augmented generation, dense retrieval, hierarchical retrieval,
+mixture of experts, medical question answering, on-device inference,
+large language models
+\end{IEEEkeywords}
+
+\section{Introduction}
+Large language models can produce fluent medical explanations but hallucinate
+facts they were not reliably trained on, and privacy concerns discourage sending
+personal health questions to hosted APIs. Retrieval-augmented generation
+(RAG)~\cite{lewis2020rag} mitigates the first problem by grounding generation in
+retrieved evidence; running the entire pipeline locally mitigates the second.
+Building such a system for lay medical use, however, exposes two failure modes
+that standard RAG does not handle.
+
+\textbf{The altitude gap.} Users ask questions at very different levels of
+abstraction. ``What is the maximum daily dose of acetaminophen?'' is answered by
+a single leaf passage. ``How does chronic stress affect the body overall?''
+is not: no single passage contains the answer, which is an aggregate over
+cardiovascular, immune, digestive, and neurological sources. Flat dense
+retrieval, tuned to return the top passages, structurally cannot serve the
+second class. Recursive summarization indexes such as
+RAPTOR~\cite{sarthi2024raptor} add higher-level summary nodes to close this gap
+on the \emph{index} side, but still search those nodes with the raw user query,
+whose embedding sits far from any summary.
+
+\textbf{The phrasing gap.} Patients phrase questions colloquially and
+incompletely (``my chest feels tight when I'm stressed''), whereas the corpus is
+written in clinical register. Single-vector dense retrieval blurs exact terms and
+is sensitive to this mismatch. Hypothetical Document Embeddings
+(HyDE)~\cite{gao2023hyde} address this on the \emph{query} side by embedding a
+generated hypothetical answer instead of the question, but classic HyDE produces
+one hypothetical against one flat index.
+
+Our key observation is that these two mechanisms are complementary along the
+same axis---abstraction---and can be fused. We generate a hypothetical at
+\emph{two} altitudes in a single language-model call and route each to the index
+tier whose granularity it matches. The specific hypothetical is concatenated
+with the query for leaf retrieval; the broad hypothetical searches the summary
+tree. This \emph{altitude matching} aligns query and corpus geometry on both
+axes simultaneously, and the marginal cost of the second altitude is zero because
+both are produced by the same call.
+
+We integrate altitude-matched retrieval into Healix, a local-first medical
+companion, alongside a system-level sparse Mixture-of-Medical-Experts router, a
+hybrid dense/sparse retriever with reranking, and a persona-controlled generator,
+all served offline from a single GPU. Our contributions are:
+\begin{enumerate}
+\item \textbf{Altitude-matched retrieval}, a novel coupling of HyDE and RAPTOR in
+which multi-granularity hypotheticals are routed to matching index tiers
+(Section~\ref{sec:altitude}).
+\item \textbf{Agentic Mixture-of-Medical-Experts (MoME)}, an embedding-gated
+sparse router over specialist retrieval lenses that expands evidence coverage
+without a second generation pass (Section~\ref{sec:moe}).
+\item \textbf{A fully local, disclaimer-free deployment} with latency
+engineering that makes the multi-stage stack interactive on commodity hardware,
+and a query-variation evaluation on MedQuAD/PubMedQA quantifying each stage
+(Sections~\ref{sec:impl}--\ref{sec:eval}).
+\end{enumerate}
+
+\section{Related Work}
+\textbf{Dense and hybrid retrieval.} Dense passage retrieval~\cite{karpukhin2020dpr}
+maps queries and passages to a shared vector space; we use BGE
+embeddings~\cite{xiao2024cpack} over a FAISS~\cite{johnson2019faiss} index.
+Lexical BM25~\cite{robertson2009bm25} remains competitive for exact terms (drug
+names, rare conditions); fusing the two with Reciprocal Rank
+Fusion~\cite{cormack2009rrf} and cross-encoder
+reranking~\cite{reimers2019sbert} is now standard practice, and Anthropic's
+Contextual Retrieval~\cite{anthropic2024contextual} shows that prepending
+situating context before indexing further improves recall. Healix uses all of
+these as its base retriever.
+
+\textbf{Query- and index-side augmentation.}
+HyDE~\cite{gao2023hyde} embeds a generated hypothetical answer to bridge the
+query--corpus register gap. RAPTOR~\cite{sarthi2024raptor} builds a tree of
+recursive summaries so that broad queries can retrieve aggregated evidence. Both
+are single-altitude: HyDE produces one hypothetical; RAPTOR searches its tree
+with the raw query. We are not aware of prior work that generates hypotheticals
+at multiple abstraction levels and matches each to a corresponding index tier.
+
+\textbf{Mixture of experts and agents.} Sparsely-gated
+MoE~\cite{shazeer2017moe} and Switch Transformers~\cite{fedus2022switch} route
+tokens to expert sub-networks \emph{inside} a model. More recently,
+mixture-of-agents approaches~\cite{wang2024moa} route at the system level across
+LLM instances. Healix applies sparse gating one level up again---over medical
+\emph{specialties}, each with its own retrieval lens---so that routing shapes
+evidence gathering rather than parameter selection.
+
+\textbf{Medical QA and safety.} MedQuAD~\cite{benabacha2019medquad} and
+PubMedQA~\cite{jin2019pubmedqa} are widely used medical QA corpora and form our
+knowledge base and evaluation source. Large medical LLMs such as
+Med-PaLM~\cite{singhal2023medpalm} target clinician-grade benchmarks; Healix
+instead targets lay users on-device, trading model scale for privacy,
+controllability, and grounded retrieval.
+
+\section{System Architecture}\label{sec:arch}
+Healix processes each turn through the pipeline in Fig.~\ref{fig:pipeline}
+(described textually here). An input message first passes a \emph{scope gate}
+that resolves greetings, identity, and clearly non-medical requests to canned
+responses with zero model cost, admitting only medical queries to the full
+pipeline. For an admitted query the system (i) runs the MoME router to select
+specialist lenses, (ii) generates two-altitude HyDE hypotheticals, (iii)
+retrieves leaf evidence via hybrid dense/sparse search under each expert lens and
+overview evidence from the RAPTOR tree, (iv) composes a single grounded prompt,
+and (v) streams a persona-controlled answer from a local LLM. Persistent
+conversation memory supplies continuity across turns. All components are served
+offline; the LLM runs on a local Ollama server and every index is memory-mapped
+from disk.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.94\columnwidth}{\footnotesize\ttfamily
+message $\rightarrow$ scope gate $\rightarrow$ [medical] \\
+\hspace*{1em}$\rightarrow$ MoME router (specialist lenses) \\
+\hspace*{1em}$\rightarrow$ two-altitude HyDE (one small-LM call) \\
+\hspace*{1em}$\rightarrow$ leaf: hybrid dense+BM25+RRF+rerank \\
+\hspace*{1em}$\rightarrow$ broad: RAPTOR summary-tree search \\
+\hspace*{1em}$\rightarrow$ prompt compose $\rightarrow$ local LLM stream}}
+\caption{The Healix per-turn pipeline. Altitude-matched retrieval
+(Section~\ref{sec:altitude}) spans the two retrieval lines; the MoME router
+(Section~\ref{sec:moe}) conditions the leaf line.}
+\label{fig:pipeline}
+\end{figure}
+
+\section{Altitude-Matched Retrieval}\label{sec:altitude}
+\subsection{Hierarchical index}
+The leaf tier $L_0$ is the corpus of $N{=}239{,}644$ passage chunks embedded
+with BGE and indexed in FAISS using 8-bit scalar quantization, chosen because it
+preserves absolute cosine scores (mean score error $1.7\times10^{-4}$ versus a
+flat index) so that score thresholds remain valid. We construct two summary
+tiers offline. Leaf embeddings are reconstructed directly from the quantized
+index (no re-embedding) and clustered with $k$-means into $K_1{=}1500$ topic
+clusters; the local LLM summarizes each cluster's representative members into a
+titled overview paragraph, forming tier $L_1$. The $L_1$ summaries are themselves
+embedded and clustered into $K_2{=}120$ domain nodes ($L_2$). The build is
+resumable and processes clusters largest-first so partial builds cover the
+highest-mass topics. The resulting tree contains $1500{+}114{=}1614$ overview
+nodes.
+
+\subsection{Two-altitude hypotheticals}
+Given query $q$, a single small-LM call emits two hypotheticals: a
+\emph{specific} sentence $h_s$ carrying concrete clinical detail, and a
+\emph{broad} sentence $h_b$ naming the overarching topic. We deliberately use a
+sub-billion-parameter model here because the hypothetical is consumed only as an
+embedding target, not shown to the user; a lenient parser falls back to the raw
+generation when a small model ignores the output format, so the mechanism never
+silently no-ops.
+
+\subsection{Matched routing}
+Leaf retrieval embeds the concatenation $[q ; h_s]$ and searches $L_0$ through
+the full hybrid pipeline. Overview retrieval embeds $h_b$ (falling back to $q$)
+and searches $L_1{\cup}L_2$; the top overview nodes are \emph{prepended} to the
+evidence block so the generator reads the frame before the details. Formally, for
+tier $L_t$ with granularity $g_t$, we search with the hypothetical $h$ whose
+target granularity is closest to $g_t$:
+\[
+\text{evidence} \;=\; \bigcup_{t}\; \text{TopK}\big(L_t,\; \phi(h_{\arg\min_a |g_a-g_t|})\big),
+\]
+where $\phi$ is the shared embedding function. Classic HyDE is the special case
+of a single tier and single hypothetical; classic RAPTOR is the special case of
+searching all tiers with $\phi(q)$. Matching the hypothetical's altitude to the
+tier aligns query and corpus geometry on both axes at once, and because both
+hypotheticals come from one call, the second altitude is free. The mechanism is
+\emph{fail-open}: any error, a missing tree, or an unavailable LM degrades
+gracefully to standard hybrid retrieval on $q$.
+
+\section{Agentic Mixture-of-Medical-Experts}\label{sec:moe}
+Rather than route tokens (as in intra-model MoE) or whole LLM instances (as in
+mixture-of-agents), Healix routes over medical \emph{specialties}. Each expert
+$e$ carries (i) a semantic prototype $p_e$ encoded once, (ii) a keyword prior,
+and (iii) a retrieval \emph{lens}---a query reformulation template. The gate
+computes cosine similarity between the query embedding and each prototype, adds
+keyword and imaging-modality boosts, and applies a sharpened softmax; the top-$k$
+experts above a floor are activated:
+\[
+w_e = \mathrm{softmax}_\tau\!\big(\langle \phi(q), p_e\rangle + \beta\,\mathbb{1}[\text{kw}] + \gamma\,\mathbb{1}[\text{modality}]\big).
+\]
+Each activated expert reformulates $q$ through its lens and gathers
+specialty-specific evidence; the union grounds a \emph{single} synthesis pass
+framed as an integrated panel, so coverage improves without the cost of multiple
+generations. The current roster covers Cardiology, Pulmonology, Neurology,
+Dermatology, Gastroenterology, Musculoskeletal, Pharmacology, Psychophysiology,
+and a default General expert. Activated experts and gate weights are surfaced to
+the user as an explainability signal.
+
+\section{Implementation and Latency Engineering}\label{sec:impl}
+Healix is served by a FastAPI backend streaming tokens over Server-Sent Events to
+a browser UI; generation uses a local Ollama server (default
+\texttt{qwen2.5:7b-instruct}). The knowledge index (175\,MB quantized) and chunk
+store are memory-mapped. Because the multi-stage pipeline places several
+operations \emph{before} the first generated token, query-side latency dominates
+perceived responsiveness. Profiling the live server isolated the two-altitude
+HyDE call as the bottleneck: invoking the full 7B model to draft throwaway
+embedding text cost $\approx$10\,s, while MoME evidence gathering cost only
+$\approx$0.6\,s. Because the hypothetical is used only for embedding, we moved
+HyDE to a sub-billion-parameter model with a lenient parser, cutting the call to
+$\approx$3\,s. Table~\ref{tab:latency} reports the resulting end-to-end
+improvement; all components remain fail-open so any stage can be disabled or can
+fail without breaking a response.
+
+\begin{table}[t]
+\caption{End-to-end query latency, warm, single RTX-4060-class GPU
+(mean over held-out medical queries).}
+\label{tab:latency}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Configuration & Retrieval (s) & Total (s) & Time-to-first-token (s) \\
+\midrule
+HyDE on 7B model      & 8--10 & $\approx$22 & $\approx$18 \\
+HyDE on 0.5B model    & 3--4  & $\approx$10 & $\approx$6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Evaluation}\label{sec:eval}
+\subsection{Protocol}
+Because the corpus questions appear verbatim in the index, evaluating retrieval
+with the raw question is circular (dense retrieval trivially self-matches). We
+therefore use a \emph{query-variation} protocol: we sample $n$ question--chunk
+pairs, paraphrase each question into colloquial patient phrasing with an LLM,
+keep the \emph{original chunk} as the gold target, and measure whether each
+retrieval configuration recovers it in the top~$k$. This isolates robustness to
+phrasing, exactly the property hybrid and HyDE claim to improve. We report
+Recall@1/5/10 and MRR@10 for three configurations: \textbf{dense} (FAISS +
+cross-encoder rerank), \textbf{hybrid} (dense + contextual BM25 + RRF + rerank),
+and \textbf{hybrid+HyDE} (hybrid search over $[q;h_s]$). Sample size $n$, seed,
+and paraphrase model are fixed and released with the code.
+
+\subsection{Retrieval results}
+Table~\ref{tab:retrieval} reports the query-variation benchmark, and the result
+is a candid one: on this single-target task the three configurations are
+statistically indistinguishable (all within $\approx$2 points on every metric;
+identical Recall@10 of $0.880$), and adding HyDE does not improve recall while
+costing $\approx$3\,s per query. We report this rather than a favorable
+subset. Three factors plausibly explain the parity. \emph{(i)} The cross-encoder
+reranker is strong and largely equalizes the candidate sets that dense and
+hybrid produce, a known effect when reranking dominates first-stage recall.
+\emph{(ii)} An LLM paraphrase of an in-domain question preserves most medical
+salience, so the dense encoder rarely fails badly enough for lexical or
+hypothetical augmentation to rescue it. \emph{(iii)} The metric scores recovery
+of a \emph{single} gold chunk; it does not measure the aggregate-evidence regime
+that the hierarchical arm targets, so it cannot credit altitude matching. The
+practical implication is concrete: on in-domain single-target retrieval, HyDE's
+latency is not justified by recall, which is precisely why we make it cheap
+(small model) and fail-open rather than mandatory. Demonstrating a retrieval win
+for hybrid/HyDE requires harder out-of-distribution or term-heavy queries (e.g.,
+rare drug or gene names), which this in-domain benchmark does not contain; we
+flag this as the primary evaluation gap.
+\begin{table}[t]
+\caption{Query-variation retrieval on paraphrased MedQuAD/PubMedQA
+($n{=}150$, $k{=}10$, seed 13, 100\% paraphrased). Higher is better; last column
+is mean query-side latency.}
+\label{tab:retrieval}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Configuration & R@1 & R@5 & R@10 & MRR@10 & Lat.\,(s) \\
+\midrule
+Dense          & \textbf{0.700} & \textbf{0.853} & 0.880 & \textbf{0.760} & 0.14 \\
+Hybrid         & \textbf{0.700} & 0.820 & 0.880 & 0.755 & 0.19 \\
+Hybrid + HyDE  & 0.667 & 0.847 & 0.880 & 0.739 & 3.24 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Hierarchical retrieval}
+The altitude-matched broad arm is evaluated qualitatively, as no single gold
+chunk exists for aggregate questions. On broad queries the summary tree returns
+on-topic overview nodes with high similarity (e.g., ``how does stress affect the
+body'' $\rightarrow$ \emph{Stress and Brain Function}, \emph{Cortisol and Stress
+Responses}; ``managing diabetes'' $\rightarrow$ \emph{Preventing and Managing
+Diabetes}), whereas a 24-node ablation of the tree returned only loosely related
+nodes---indicating that coverage, not the mechanism, governs broad-arm quality.
+A gold-labeled aggregate-answer benchmark is left to future work.
+
+\subsection{System behavior}
+Under a 5-way concurrent load the server completed all requests with isolated
+conversation state and no errors, serializing generation behind a single lock.
+Adversarial and out-of-domain inputs (prompt-injection attempts, non-medical
+requests, empty and malformed messages) were refused or handled without leaking
+system instructions.
+
+\section{Discussion and Limitations}
+\textbf{Safety posture.} Healix is deliberately disclaimer-free and avoids
+ritual ``consult a professional'' closings, favoring specific, calm guidance.
+This design choice trades a conventional safety net for readability and must be
+revisited for any real deployment, particularly the handling of red-flag
+emergency presentations, where suppressing urgent guidance would be harmful.
+\textbf{Evaluation scope.} Our benchmark measures retrieval, not answer quality;
+a human or LLM-judge study of grounded answer accuracy is the most important next
+step. \textbf{Model ceiling.} The 7B generator bounds clinical nuance; the
+architecture is model-agnostic and benefits directly from stronger local models.
+\textbf{Paraphrase confound.} The query-variation protocol paraphrases questions
+with an LLM. The retriever's encoder is a separate embedding model, so this is
+less circular than an LLM-as-judge study, but paraphrase artifacts remain; a
+human-paraphrased query set would be stronger. We fix the seed and release all
+artifacts for reproduction.
+
+\section{Conclusion}
+We presented Healix and \emph{altitude-matched retrieval}, which couples HyDE and
+RAPTOR by generating multi-granularity hypotheticals and routing each to the
+matching tier of a hierarchical index, together with a system-level
+Mixture-of-Medical-Experts router. The complete stack runs offline on commodity
+hardware, and our latency engineering makes it interactive. We hope the
+altitude-matching idea---aligning query and corpus abstraction jointly---proves
+useful beyond the medical setting. Code and artifacts are released to support
+reproduction.
+
+\begin{thebibliography}{00}
+\bibitem{lewis2020rag} P. Lewis \emph{et al.}, ``Retrieval-augmented generation
+for knowledge-intensive NLP tasks,'' in \emph{Proc. NeurIPS}, 2020.
+\bibitem{gao2023hyde} L. Gao, X. Ma, J. Lin, and J. Callan, ``Precise zero-shot
+dense retrieval without relevance labels,'' in \emph{Proc. ACL}, 2023.
+\bibitem{sarthi2024raptor} P. Sarthi \emph{et al.}, ``RAPTOR: Recursive abstractive
+processing for tree-organized retrieval,'' in \emph{Proc. ICLR}, 2024.
+\bibitem{karpukhin2020dpr} V. Karpukhin \emph{et al.}, ``Dense passage retrieval
+for open-domain question answering,'' in \emph{Proc. EMNLP}, 2020.
+\bibitem{robertson2009bm25} S. Robertson and H. Zaragoza, ``The probabilistic
+relevance framework: BM25 and beyond,'' \emph{Found. Trends Inf. Retr.}, 2009.
+\bibitem{cormack2009rrf} G. V. Cormack, C. L. A. Clarke, and S. Buettcher,
+``Reciprocal rank fusion outperforms Condorcet and individual rank learning
+methods,'' in \emph{Proc. SIGIR}, 2009.
+\bibitem{reimers2019sbert} N. Reimers and I. Gurevych, ``Sentence-BERT: Sentence
+embeddings using Siamese BERT-networks,'' in \emph{Proc. EMNLP}, 2019.
+\bibitem{xiao2024cpack} S. Xiao \emph{et al.}, ``C-Pack: Packed resources for
+general Chinese embeddings,'' in \emph{Proc. SIGIR}, 2024.
+\bibitem{johnson2019faiss} J. Johnson, M. Douze, and H. J\'egou, ``Billion-scale
+similarity search with GPUs,'' \emph{IEEE Trans. Big Data}, 2019.
+\bibitem{anthropic2024contextual} Anthropic, ``Introducing contextual
+retrieval,'' Tech. Report, 2024.
+\bibitem{shazeer2017moe} N. Shazeer \emph{et al.}, ``Outrageously large neural
+networks: The sparsely-gated mixture-of-experts layer,'' in \emph{Proc. ICLR},
+2017.
+\bibitem{fedus2022switch} W. Fedus, B. Zoph, and N. Shazeer, ``Switch
+transformers: Scaling to trillion parameter models with simple and efficient
+sparsity,'' \emph{J. Mach. Learn. Res.}, 2022.
+\bibitem{wang2024moa} J. Wang \emph{et al.}, ``Mixture-of-agents enhances large
+language model capabilities,'' \emph{arXiv:2406.04692}, 2024.
+\bibitem{benabacha2019medquad} A. Ben Abacha and D. Demner-Fushman, ``A
+question-entailment approach to question answering,'' \emph{BMC Bioinformatics},
+2019.
+\bibitem{jin2019pubmedqa} Q. Jin \emph{et al.}, ``PubMedQA: A dataset for
+biomedical research question answering,'' in \emph{Proc. EMNLP}, 2019.
+\bibitem{singhal2023medpalm} K. Singhal \emph{et al.}, ``Large language models
+encode clinical knowledge,'' \emph{Nature}, 2023.
+\end{thebibliography}
+
+\end{document}
