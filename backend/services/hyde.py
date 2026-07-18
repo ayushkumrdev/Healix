@@ -41,7 +41,12 @@ def generate_hypotheticals(query: str, timeout: float = 12.0) -> Dict[str, str]:
     try:
         import requests
         url = os.getenv("BAYMAX_OLLAMA_URL", "http://localhost:11434").rstrip("/")
-        model = os.getenv("BAYMAX_OLLAMA_MODEL", "llama3:latest")
+        # HyDE only needs a plausible, topical hypothetical for embedding — not a
+        # strong model. Use HEALIX_HYDE_MODEL (e.g. a fast 0.5B) when set; it cuts
+        # this blocking pre-retrieval call from ~10s to ~3s. Falls back to the
+        # main generation model.
+        model = (os.getenv("HEALIX_HYDE_MODEL", "").strip()
+                 or os.getenv("BAYMAX_OLLAMA_MODEL", "qwen2.5:7b-instruct"))
         r = requests.post(f"{url}/api/generate", json={
             "model": model,
             "prompt": _PROMPT.format(q=q[:400]),
@@ -60,6 +65,19 @@ def generate_hypotheticals(query: str, timeout: float = 12.0) -> Dict[str, str]:
             line = m.group(1).strip().splitlines()[0].strip()
             if len(line) > 15:
                 out[key] = line[:400]
+    # Lenient fallback: small/fast models often ignore the labels and just write
+    # a plain paragraph. That prose is still a fine leaf-retrieval hypothetical —
+    # use it as "specific" so HyDE never silently no-ops. (broad stays empty; the
+    # caller falls back to the raw query for the RAPTOR arm.)
+    if not out.get("specific"):
+        plain = re.sub(r"(?i)\b(specific|broad)\s*:\s*", " ", text)
+        # Drop a leading prompt-echo preamble ("A patient ... asks: '...'")
+        # that small models sometimes emit before the real hypothetical.
+        plain = re.sub(r'(?is)^.*?\basks?\s*:\s*"[^"]*"\s*[.,:;-]*', "", plain)
+        plain = re.sub(r"(?i)^\s*(specifically|in general)[,:]?\s*", "", plain)
+        plain = " ".join(plain.split())
+        if len(plain) > 25:
+            out["specific"] = plain[:400]
     return out
 
 

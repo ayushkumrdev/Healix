@@ -88,6 +88,8 @@ set HEALIX_HYBRID=1
 rem HyDE query expansion + RAPTOR overview tree (fail-open if artifacts absent)
 set HEALIX_HYDE=1
 set HEALIX_RAPTOR=1
+rem HyDE uses a small fast model for the hypothetical (~3s vs ~10s); unset to reuse main
+set HEALIX_HYDE_MODEL=qwen2.5:0.5b-instruct
 
 rem LLM backend: use the local Ollama server (clear BAYMAX_LLM_BACKEND for GGUF)
 set BAYMAX_LLM_BACKEND=ollama
