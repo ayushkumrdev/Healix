@@ -26,29 +26,28 @@ Email: preetndt@gmail.com}
 \maketitle
 
 \begin{abstract}
-Retrieval-augmented generation (RAG) has become the dominant paradigm for
-grounding large language models (LLMs) in domain knowledge, yet two structural
-gaps persist for consumer medical question answering. First, flat retrieval
-returns leaf passages that answer specific questions well but cannot serve
-\emph{broad} questions whose answer lives only in the aggregate of many
-passages. Second, single-embedding dense retrieval is brittle to the colloquial,
-under-specified phrasing typical of patients. We present \textbf{Healix}, a
-fully on-device medical reasoning companion, and its retrieval stack, which
-addresses both gaps with a single mechanism we call \emph{altitude-matched
-retrieval}: one small language model drafts a \emph{hypothetical} answer at two
-levels of abstraction, and each level is routed to the matching tier of a
-hierarchical index---a specific hypothetical searches the leaf passage index,
-while a broad hypothetical searches a RAPTOR-style summary tree. This couples
-Hypothetical Document Embeddings (HyDE) and recursive summarization in a way
-that, to our knowledge, has not been described. We further introduce an
-\emph{agentic Mixture-of-Medical-Experts} (MoME) router that performs
-system-level sparse gating over specialist retrieval lenses. The complete system
-runs offline on a single commodity GPU. On a query-variation retrieval benchmark
-derived from MedQuAD and PubMedQA, we report the effect of each stage on
-Recall@$k$ and MRR, and we quantify the latency engineering---most notably a
-$3\times$ reduction in query-side overhead---required to make the stack
-interactive. We discuss the safety posture of a disclaimer-free medical
-assistant and release the full system as open source.
+Retrieval-augmented generation (RAG) grounds large language models (LLMs) in
+domain knowledge, but two problems remain when the users are patients rather than
+clinicians. Flat retrieval returns leaf passages that answer a specific question
+well, yet a broad question such as ``how does chronic stress affect the body''
+has no single passage that answers it; the answer is spread across many. And a
+single dense embedding of a colloquial, under-specified query often fails to
+match a corpus written in clinical register. We describe Healix, an on-device
+medical companion, and a retrieval method we call \emph{altitude-matched
+retrieval} that targets both problems together. A small language model drafts a
+hypothetical answer at two levels of abstraction in one call; the specific
+version joins the query to search the leaf passage index, and the broad version
+searches a RAPTOR-style summary tree. Coupling Hypothetical Document Embeddings
+(HyDE) with recursive summarization this way---matching each hypothetical to the
+index tier of the same granularity---does not appear in prior work. Healix also
+uses an agentic Mixture-of-Medical-Experts (MoME) router that gates queries to
+specialist retrieval lenses at the system level, and it runs entirely offline on
+one commodity GPU. We evaluate the retrieval stack on a query-variation benchmark
+built from MedQuAD and PubMedQA, report a candid null result on single-target
+recall, and analyze why. We also detail the latency work---a $3\times$ cut in
+query-side overhead---that keeps the pipeline interactive, discuss the safety
+posture of a deliberately disclaimer-free assistant, and release the system as
+open source.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -85,14 +84,12 @@ is sensitive to this mismatch. Hypothetical Document Embeddings
 generated hypothetical answer instead of the question, but classic HyDE produces
 one hypothetical against one flat index.
 
-Our key observation is that these two mechanisms are complementary along the
-same axis---abstraction---and can be fused. We generate a hypothetical at
-\emph{two} altitudes in a single language-model call and route each to the index
-tier whose granularity it matches. The specific hypothetical is concatenated
-with the query for leaf retrieval; the broad hypothetical searches the summary
-tree. This \emph{altitude matching} aligns query and corpus geometry on both
-axes simultaneously, and the marginal cost of the second altitude is zero because
-both are produced by the same call.
+HyDE and RAPTOR act on the same axis---abstraction---from opposite ends, so they
+can be combined. We generate a hypothetical at two altitudes in one
+language-model call and send each to the tier whose granularity it matches: the
+specific hypothetical joins the query for leaf retrieval, and the broad one
+searches the summary tree. Because both come from a single call, the second
+altitude costs nothing extra.
 
 We integrate altitude-matched retrieval into Healix, a local-first medical
 companion, alongside a system-level sparse Mixture-of-Medical-Experts router, a
@@ -281,25 +278,22 @@ and \textbf{hybrid+HyDE} (hybrid search over $[q;h_s]$). Sample size $n$, seed,
 and paraphrase model are fixed and released with the code.
 
 \subsection{Retrieval results}
-Table~\ref{tab:retrieval} reports the query-variation benchmark, and the result
-is a candid one: on this single-target task the three configurations are
-statistically indistinguishable (all within $\approx$2 points on every metric;
-identical Recall@10 of $0.880$), and adding HyDE does not improve recall while
-costing $\approx$3\,s per query. We report this rather than a favorable
-subset. Three factors plausibly explain the parity. \emph{(i)} The cross-encoder
-reranker is strong and largely equalizes the candidate sets that dense and
-hybrid produce, a known effect when reranking dominates first-stage recall.
-\emph{(ii)} An LLM paraphrase of an in-domain question preserves most medical
-salience, so the dense encoder rarely fails badly enough for lexical or
-hypothetical augmentation to rescue it. \emph{(iii)} The metric scores recovery
-of a \emph{single} gold chunk; it does not measure the aggregate-evidence regime
-that the hierarchical arm targets, so it cannot credit altitude matching. The
-practical implication is concrete: on in-domain single-target retrieval, HyDE's
-latency is not justified by recall, which is precisely why we make it cheap
-(small model) and fail-open rather than mandatory. Demonstrating a retrieval win
-for hybrid/HyDE requires harder out-of-distribution or term-heavy queries (e.g.,
-rare drug or gene names), which this in-domain benchmark does not contain; we
-flag this as the primary evaluation gap.
+Table~\ref{tab:retrieval} gives the benchmark, and the outcome is negative: the
+three configurations differ by at most two points on any metric, share an
+identical Recall@10 of $0.880$, and HyDE spends about three seconds per query
+without improving recall. We report the full result rather than a favorable
+slice. The parity has three likely causes. The cross-encoder reranker is strong
+enough to equalize the candidate sets that dense and hybrid produce, which is the
+expected behavior once reranking, not first-stage recall, decides the ordering.
+An LLM paraphrase of an in-domain question also keeps most of its medical
+content, so the dense encoder rarely misses by enough for lexical or hypothetical
+augmentation to help. And the metric only credits recovery of one gold chunk, so
+it cannot reward the aggregate-evidence case the hierarchical arm is built for.
+The engineering consequence is clear: for in-domain single-target retrieval, the
+cost of HyDE is not repaid in recall, which is why we keep it cheap and optional
+rather than mandatory. Showing a win for hybrid or HyDE would need harder queries
+than this benchmark contains---out-of-distribution phrasing or rare drug and gene
+names---and building that set is the main evaluation gap we leave open.
 \begin{table}[t]
 \caption{Query-variation retrieval on paraphrased MedQuAD/PubMedQA
 ($n{=}150$, $k{=}10$, seed 13, 100\% paraphrased). Higher is better; last column
@@ -351,14 +345,16 @@ human-paraphrased query set would be stronger. We fix the seed and release all
 artifacts for reproduction.
 
 \section{Conclusion}
-We presented Healix and \emph{altitude-matched retrieval}, which couples HyDE and
-RAPTOR by generating multi-granularity hypotheticals and routing each to the
-matching tier of a hierarchical index, together with a system-level
-Mixture-of-Medical-Experts router. The complete stack runs offline on commodity
-hardware, and our latency engineering makes it interactive. We hope the
-altitude-matching idea---aligning query and corpus abstraction jointly---proves
-useful beyond the medical setting. Code and artifacts are released to support
-reproduction.
+We described Healix and altitude-matched retrieval, which couples HyDE and RAPTOR
+by drafting hypotheticals at two granularities and routing each to the matching
+tier of a hierarchical index, alongside a system-level Mixture-of-Medical-Experts
+router. The stack runs offline on commodity hardware, and the latency work keeps
+it interactive. Our retrieval benchmark did not separate the configurations, and
+we report that plainly; the open questions are whether altitude matching helps on
+aggregate questions, measured against a labeled set, and whether hybrid and HyDE
+help on harder query distributions. Aligning query and corpus abstraction jointly
+is a general idea, not a medical one, and may transfer to other domains. Code and
+artifacts are released for reproduction.
 
 \begin{thebibliography}{00}
 \bibitem{lewis2020rag} P. Lewis \emph{et al.}, ``Retrieval-augmented generation
