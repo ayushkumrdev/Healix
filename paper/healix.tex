@@ -42,12 +42,18 @@ searches a RAPTOR-style summary tree. Coupling Hypothetical Document Embeddings
 index tier of the same granularity---does not appear in prior work. Healix also
 uses an agentic Mixture-of-Medical-Experts (MoME) router that gates queries to
 specialist retrieval lenses at the system level, and it runs entirely offline on
-one commodity GPU. We evaluate the retrieval stack on a query-variation benchmark
-built from MedQuAD and PubMedQA, report a candid null result on single-target
-recall, and analyze why. We also detail the latency work---a $3\times$ cut in
-query-side overhead---that keeps the pipeline interactive, discuss the safety
-posture of a deliberately disclaimer-free assistant, and release the system as
-open source.
+one commodity GPU. We evaluate the stack with pre-registered hypotheses across four experiments:
+paraphrased and keyword query variation, subtopic coverage on broad questions,
+and end-to-end latency. The retrieval results are candidly negative---on this
+curated corpus a strong dense encoder is near ceiling, hybrid fusion and HyDE add
+no significant recall, and at a fixed evidence budget summary nodes cover
+\emph{fewer} answer subtopics than leaf passages. The positive result is a
+systems one: moving the query-side HyDE call to a sub-billion-parameter model
+cuts end-to-end time-to-first-token from 14.7\,s to 6.4\,s ($2.3\times$), far
+exceeding the isolated call's speedup, because on a single shared GPU the cost of
+an auxiliary model is dominated by contention rather than its own size. We
+discuss the safety posture of a deliberately disclaimer-free assistant and
+release the system, benchmarks, and all artifacts as open source.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -102,9 +108,12 @@ which multi-granularity hypotheticals are routed to matching index tiers
 \item \textbf{Agentic Mixture-of-Medical-Experts (MoME)}, an embedding-gated
 sparse router over specialist retrieval lenses that expands evidence coverage
 without a second generation pass (Section~\ref{sec:moe}).
-\item \textbf{A fully local, disclaimer-free deployment} with latency
-engineering that makes the multi-stage stack interactive on commodity hardware,
-and a query-variation evaluation on MedQuAD/PubMedQA quantifying each stage
+\item \textbf{An honest, pre-registered evaluation} of the full stack on
+MedQuAD/PubMedQA---paraphrased and keyword query variation, broad-question
+subtopic coverage, and end-to-end latency---whose retrieval results are largely
+negative and reported as such, and whose positive finding is architectural: on a
+shared single GPU, auxiliary-model cost is governed by contention, and offloading
+the query-side model yields a $2.3\times$ end-to-end speedup
 (Sections~\ref{sec:impl}--\ref{sec:eval}).
 \end{enumerate}
 
@@ -237,33 +246,48 @@ the user as an explainability signal.
 Healix is served by a FastAPI backend streaming tokens over Server-Sent Events to
 a browser UI; generation uses a local Ollama server (default
 \texttt{qwen2.5:7b-instruct}). The knowledge index (175\,MB quantized) and chunk
-store are memory-mapped. Because the multi-stage pipeline places several
-operations \emph{before} the first generated token, query-side latency dominates
-perceived responsiveness. Profiling the live server isolated the two-altitude
-HyDE call as the bottleneck: invoking the full 7B model to draft throwaway
-embedding text cost $\approx$10\,s, while MoME evidence gathering cost only
-$\approx$0.6\,s. Because the hypothetical is used only for embedding, we moved
-HyDE to a sub-billion-parameter model with a lenient parser, cutting the call to
-$\approx$3\,s. Table~\ref{tab:latency} reports the resulting end-to-end
-improvement; all components remain fail-open so any stage can be disabled or can
-fail without breaking a response.
+store are memory-mapped. Because the multi-stage pipeline runs several operations
+\emph{before} the first generated token, query-side latency governs perceived
+responsiveness, and HyDE is the largest such operation---it invokes a language
+model on the critical path. Since the hypothetical is consumed only as an
+embedding target, we run HyDE on a sub-billion-parameter model rather than the
+generation model.
+
+Two measurements quantify the effect (Table~\ref{tab:latency}), and their
+difference is instructive. In isolation, the HyDE call itself shrinks only
+modestly, from $3.76$\,s to $3.01$\,s (mean over 25 queries; paired bootstrap
+95\% CI on the gap $[0.67, 0.85]$\,s). End to end on the warm server, however,
+time-to-first-token falls from $14.7$\,s to $6.4$\,s and total latency from
+$16.6$\,s to $8.7$\,s (mean over 10 queries each)---a $2.3\times$ reduction far
+larger than the isolated saving. The gap is GPU contention: on a single 8\,GB
+device the 7B HyDE call competes with the embedding model and cross-encoder
+reranker for compute, so it runs much slower inside the live pipeline than alone.
+Offloading it to a 0.5B model removes that contention. The lesson generalizes to
+any multi-stage local pipeline that time-shares one accelerator: the cost of an
+auxiliary model is dominated by contention, not by its own size. All stages remain
+fail-open, so any component can be disabled or fail without breaking a response.
 
 \begin{table}[t]
-\caption{End-to-end query latency, warm, single RTX-4060-class GPU
-(mean over held-out medical queries).}
+\caption{HyDE latency, warm, single 8\,GB (RTX-4060-class) GPU. Isolated =
+the HyDE call alone; end-to-end = full pipeline time-to-first-token and total.}
 \label{tab:latency}
 \centering
-\begin{tabular}{lccc}
+\begin{tabular}{lcc}
 \toprule
-Configuration & Retrieval (s) & Total (s) & Time-to-first-token (s) \\
+Measurement & HyDE on 7B & HyDE on 0.5B \\
 \midrule
-HyDE on 7B model      & 8--10 & $\approx$22 & $\approx$18 \\
-HyDE on 0.5B model    & 3--4  & $\approx$10 & $\approx$6 \\
+Isolated HyDE call (s)      & 3.76 & 3.01 \\
+End-to-end TTFT (s)         & 14.7 & \textbf{6.4} \\
+End-to-end total (s)        & 16.6 & \textbf{8.7} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \section{Evaluation}\label{sec:eval}
+We ran four experiments, each with its hypothesis stated before execution, and we
+report every outcome including the failures. All harnesses, seeds, and result
+files are released.
+
 \subsection{Protocol}
 Because the corpus questions appear verbatim in the index, evaluating retrieval
 with the raw question is circular (dense retrieval trivially self-matches). We
@@ -311,15 +335,35 @@ Hybrid + HyDE  & 0.667 & 0.847 & 0.880 & 0.739 & 3.24 \\
 \end{tabular}
 \end{table}
 
-\subsection{Hierarchical retrieval}
-The altitude-matched broad arm is evaluated qualitatively, as no single gold
-chunk exists for aggregate questions. On broad queries the summary tree returns
-on-topic overview nodes with high similarity (e.g., ``how does stress affect the
-body'' $\rightarrow$ \emph{Stress and Brain Function}, \emph{Cortisol and Stress
-Responses}; ``managing diabetes'' $\rightarrow$ \emph{Preventing and Managing
-Diabetes}), whereas a 24-node ablation of the tree returned only loosely related
-nodes---indicating that coverage, not the mechanism, governs broad-arm quality.
-A gold-labeled aggregate-answer benchmark is left to future work.
+\subsection{Keyword queries}
+Dense encoders are trained on natural language and are expected to degrade on
+terse keyword input, where BM25 should help. We repeated the protocol with
+deterministic keyword queries (content words only, e.g. ``glaucoma treatment'')
+over $n{=}500$ samples. The augmentations again did not help materially: hybrid
+first-stage Recall@10 was $0.964$ versus $0.958$ for dense, a gap of $0.006$ with
+a bootstrap 95\% CI of $[0.000, 0.014]$ that includes zero. Hybrid rescued three
+queries that dense missed and lost none, so it never hurt, but the effect is not
+significant. Reranking added a small, consistent precision gain (dense Recall@1
+$0.916\rightarrow0.930$; hybrid $0.914\rightarrow0.936$). The BGE encoder handles
+keyword queries well enough on this corpus that lexical fusion has little to
+recover.
+
+\subsection{Broad questions and the hierarchical arm}
+We tested altitude matching directly on the regime it targets. We authored 24
+broad questions, each with an objective set of textbook subtopics (e.g.,
+complications of diabetes: retinopathy, nephropathy, neuropathy, cardiovascular,
+foot, wound healing), and measured \emph{subtopic coverage} at a fixed 2000-character
+evidence budget---counting how many subtopics appear in the retrieved text, which
+controls for summary nodes being longer than leaf passages. The result is
+negative and significant: flat leaf retrieval covered $0.67$ of subtopics on
+average, the RAPTOR overview tier only $0.34$, and their union $0.33$ (overview
+minus leaf gap $-0.33$, 95\% CI $[-0.46, -0.20]$). Inspection shows why: cluster
+summaries generalize---``a range of complications''---and drop the specific terms
+that leaf passages state outright, so on a corpus that already contains dedicated
+passages per subtopic, summarization removes rather than adds coverage. Altitude
+matching does not help here, and prepending overview nodes can displace more
+informative leaf evidence. Where a summary tier would help is a corpus without
+per-subtopic leaf coverage; establishing that is future work.
 
 \subsection{System behavior}
 Under a 5-way concurrent load the server completed all requests with isolated
@@ -348,13 +392,19 @@ artifacts for reproduction.
 We described Healix and altitude-matched retrieval, which couples HyDE and RAPTOR
 by drafting hypotheticals at two granularities and routing each to the matching
 tier of a hierarchical index, alongside a system-level Mixture-of-Medical-Experts
-router. The stack runs offline on commodity hardware, and the latency work keeps
-it interactive. Our retrieval benchmark did not separate the configurations, and
-we report that plainly; the open questions are whether altitude matching helps on
-aggregate questions, measured against a labeled set, and whether hybrid and HyDE
-help on harder query distributions. Aligning query and corpus abstraction jointly
-is a general idea, not a medical one, and may transfer to other domains. Code and
-artifacts are released for reproduction.
+router. We then tested the stack the hard way, with pre-registered hypotheses,
+and most of them failed: on a curated medical QA corpus a strong dense encoder
+leaves essentially no recall headroom for hybrid fusion or HyDE, and summary
+nodes cover fewer answer subtopics than the leaf passages they abstract. We take
+these results seriously rather than explaining them away. They suggest a
+practical rule for builders: measure whether the corpus already gives dense
+retrieval per-subtopic leaf coverage before paying for augmentation machinery.
+The durable positive finding is architectural---in a multi-stage pipeline
+time-sharing one accelerator, auxiliary model cost is set by contention, not
+parameter count, and offloading the query-side model yielded a $2.3\times$
+end-to-end speedup. Whether altitude matching pays off on corpora \emph{without}
+dense leaf coverage remains open, and our released benchmarks make that test
+straightforward to run. Code and artifacts are public for reproduction.
 
 \begin{thebibliography}{00}
 \bibitem{lewis2020rag} P. Lewis \emph{et al.}, ``Retrieval-augmented generation
